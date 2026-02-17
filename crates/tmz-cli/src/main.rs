@@ -1204,6 +1204,16 @@ fn print_conversation_list(convs: &[tmz_core::CachedConversation]) {
     }
 }
 
+// ── Message rendering ────────────────────────────────────────────────
+//
+// Clean chat layout inspired by pi / opencode:
+//   - Colored left-border bar (|) per sender
+//   - Sender name bold + colored, time dimmed on same line
+//   - Content indented past the bar
+//   - Date separators between days
+//   - URLs truncated to fit terminal width
+//   - Compact vertical spacing
+
 /// Terminal width, clamped to a reasonable range.
 fn term_width() -> usize {
     terminal_size::terminal_size()
@@ -1234,7 +1244,7 @@ impl MessageGroup<'_> {
     }
 }
 
-/// Group consecutive messages from the same sender.
+/// Group consecutive messages from the same sender on the same day.
 fn group_messages(messages: &[tmz_core::CachedMessage]) -> Vec<MessageGroup<'_>> {
     let mut groups: Vec<MessageGroup<'_>> = Vec::new();
 
@@ -1264,30 +1274,39 @@ fn group_messages(messages: &[tmz_core::CachedMessage]) -> Vec<MessageGroup<'_>>
     groups
 }
 
-/// Print a date separator when the day changes.
+/// Print a centered date separator when the day changes.
 fn maybe_print_date_separator(date: &str, prev_date: Option<&str>) {
     if prev_date == Some(date) {
         return;
     }
     let label = format_date_label(date);
     let w = term_width();
-    let pad_total = w.saturating_sub(label.len() + 6);
-    let left = pad_total / 2;
-    let right = pad_total - left;
-    println!();
+    let total_pad = w.saturating_sub(label.len() + 4);
+    let left = total_pad / 2;
+    let right = total_pad - left;
+    if prev_date.is_some() {
+        println!();
+    }
+    // Thin line with centered date label
     println!(
-        "\x1b[2m{:->left$} {label} {:->right$}\x1b[0m",
+        "\x1b[2m{:\u{2500}<left$} {label} {:\u{2500}<right$}\x1b[0m",
         "", ""
     );
-    println!();
 }
 
-/// Render a message group as a single colored bubble.
+/// Render a message group with a colored left border.
+///
+/// Layout:
+/// ```text
+///   \u{2502} Sender Name                              14:35
+///   \u{2502} Message content here that wraps nicely
+///   \u{2502} across multiple lines if needed
+/// ```
 fn print_bubble(group: &MessageGroup<'_>, prev: Option<&MessageGroup<'_>>) {
     let prev_date = prev.map(MessageGroup::first_date);
     maybe_print_date_separator(&group.first_date(), prev_date.as_deref());
 
-    // Gather all content lines from all messages in the group
+    // Gather content lines
     let mut lines: Vec<String> = Vec::new();
     for msg in &group.messages {
         let content = msg.content.trim();
@@ -1297,11 +1316,11 @@ fn print_bubble(group: &MessageGroup<'_>, prev: Option<&MessageGroup<'_>>) {
             for line in content.lines() {
                 let trimmed = line.trim();
                 if !trimmed.is_empty() {
-                    lines.push(trimmed.to_string());
+                    lines.push(shorten_urls(trimmed, 50));
                 }
             }
         } else if has_images {
-            lines.push("[image]".to_string());
+            lines.push("\x1b[2m[image]\x1b[0m".to_string());
         }
     }
 
@@ -1312,77 +1331,148 @@ fn print_bubble(group: &MessageGroup<'_>, prev: Option<&MessageGroup<'_>>) {
     let time = group.last_time();
     let name = group.sender;
     let w = term_width();
-    let max_bubble = w * 3 / 4;
-    let max_content = max_bubble.saturating_sub(4);
+    let content_w = w.saturating_sub(6); // "  | " prefix + margin
 
-    let wrapped = wrap_lines(&lines, max_content);
-
-    let content_width = wrapped.iter().map(|l| visible_len(l)).max().unwrap_or(0);
-    let inner_w = content_width
-        .max(visible_len(name))
-        .max(visible_len(&time))
-        .min(max_content);
-    let bubble_w = inner_w + 4;
-
-    let (bg, name_color) = if group.is_from_me {
-        ("48;5;24", "1;36")
+    // Bar color: cyan for self, yellow for others, dim for system
+    let bar_color = if name == "(system)" {
+        "2"
+    } else if group.is_from_me {
+        "36"
     } else {
-        ("48;5;238", "1;33")
+        "33"
     };
+    let name_color = if group.is_from_me { "1;36" } else { "1;33" };
 
-    let indent = if group.is_from_me {
-        w.saturating_sub(bubble_w)
-    } else {
-        1
-    };
-    let pad = " ".repeat(indent);
-
+    // Blank line between groups (not after date separator)
     if prev.is_some() && prev_date.as_deref() == Some(&group.first_date()) {
         println!();
     }
 
-    // Name header
-    let name_pad = inner_w.saturating_sub(visible_len(name));
+    // Header: bar + name + time right-aligned
+    let name_vis = visible_len(name);
+    let time_vis = visible_len(&time);
+    let gap = content_w.saturating_sub(name_vis + time_vis);
     println!(
-        "{pad}\x1b[{bg}m  \x1b[{name_color}m{name}\x1b[0;{bg}m{:name_pad$}  \x1b[0m",
+        "  \x1b[{bar_color}m\u{2502}\x1b[0m \x1b[{name_color}m{name}\x1b[0m{:gap$}\x1b[2m{time}\x1b[0m",
         ""
     );
 
-    // Content
+    // Content lines with word-wrap
+    let wrapped = wrap_lines(&lines, content_w);
     for line in &wrapped {
-        let line_pad = inner_w.saturating_sub(visible_len(line));
-        println!(
-            "{pad}\x1b[{bg};37m  {line}{:line_pad$}  \x1b[0m",
-            ""
-        );
+        println!("  \x1b[{bar_color}m\u{2502}\x1b[0m {line}");
     }
-
-    // Timestamp (right-aligned, dimmed)
-    let time_pad = inner_w.saturating_sub(visible_len(&time));
-    println!(
-        "{pad}\x1b[{bg};2m  {:time_pad$}{time}  \x1b[0m",
-        ""
-    );
 }
 
-/// Wrap lines to fit a maximum width.
+/// Shorten URLs in text to a maximum display length.
+///
+/// `https://www.linkedin.com/posts/very-long-path?utm_source=...` becomes
+/// `linkedin.com/.../very-long-path...`
+fn shorten_urls(text: &str, max_url_len: usize) -> String {
+    use std::fmt::Write;
+
+    let mut result = String::with_capacity(text.len());
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find("http") {
+        result.push_str(&remaining[..start]);
+
+        let url_str = &remaining[start..];
+        let end = url_str
+            .find(|c: char| c.is_whitespace())
+            .unwrap_or(url_str.len());
+        let url = &url_str[..end];
+
+        if url.len() > max_url_len {
+            let shortened = shorten_single_url(url, max_url_len);
+            let _ = write!(result, "\x1b[2;4m{shortened}\x1b[0m");
+        } else {
+            let _ = write!(result, "\x1b[2;4m{url}\x1b[0m");
+        }
+
+        remaining = &url_str[end..];
+    }
+    result.push_str(remaining);
+    result
+}
+
+/// Shorten a single URL to fit within `max_len` characters.
+fn shorten_single_url(url: &str, max_len: usize) -> String {
+    // Strip protocol
+    let without_proto = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+
+    // Strip www.
+    let clean = without_proto.strip_prefix("www.").unwrap_or(without_proto);
+
+    if clean.len() <= max_len {
+        return clean.to_string();
+    }
+
+    // Get domain
+    let slash_pos = clean.find('/').unwrap_or(clean.len());
+    let domain = &clean[..slash_pos];
+
+    // Strip query params for display
+    let path = &clean[slash_pos..];
+    let path_no_query = path.split('?').next().unwrap_or(path);
+    let path_no_query = path_no_query.split('#').next().unwrap_or(path_no_query);
+
+    let candidate = format!("{domain}{path_no_query}");
+    if candidate.len() <= max_len {
+        return candidate;
+    }
+
+    // Truncate path
+    let budget = max_len.saturating_sub(domain.len() + 4); // domain + /...
+    let path_truncated: String = path_no_query.chars().take(budget).collect();
+    format!("{domain}{path_truncated}...")
+}
+
+/// Wrap lines to fit a maximum width, handling long words by hard-breaking.
 fn wrap_lines(lines: &[String], max_width: usize) -> Vec<String> {
     let mut result = Vec::new();
     for line in lines {
         if visible_len(line) <= max_width {
             result.push(line.clone());
         } else {
-            // Simple word wrap
             let mut current = String::new();
+            let mut current_len = 0;
             for word in line.split_whitespace() {
+                let wlen = visible_len(word);
                 if current.is_empty() {
-                    current = word.to_string();
-                } else if visible_len(&current) + 1 + visible_len(word) <= max_width {
+                    // Single word longer than max -> hard break
+                    if wlen > max_width {
+                        let chars = word.chars();
+                        let mut chunk = String::new();
+                        let mut clen = 0;
+                        for ch in chars {
+                            let ch_w =
+                                unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                            if clen + ch_w > max_width && !chunk.is_empty() {
+                                result.push(chunk);
+                                chunk = String::new();
+                                clen = 0;
+                            }
+                            chunk.push(ch);
+                            clen += ch_w;
+                        }
+                        current = chunk;
+                        current_len = clen;
+                    } else {
+                        current = word.to_string();
+                        current_len = wlen;
+                    }
+                } else if current_len + 1 + wlen <= max_width {
                     current.push(' ');
                     current.push_str(word);
+                    current_len += 1 + wlen;
                 } else {
                     result.push(current);
                     current = word.to_string();
+                    current_len = wlen;
                 }
             }
             if !current.is_empty() {
@@ -1411,12 +1501,14 @@ fn visible_len(s: &str) -> usize {
     len
 }
 
+// ── Date/time formatting ─────────────────────────────────────────────
+
 /// Extract the date portion "2026-02-17" from an ISO timestamp.
 fn extract_date(iso: &str) -> String {
     iso.get(..10).unwrap_or(iso).to_string()
 }
 
-/// Format a date string like "2026-02-17" into a readable label.
+/// Format a date for separator lines: "February 17, 2026".
 fn format_date_label(date: &str) -> String {
     let parts: Vec<&str> = date.split('-').collect();
     if parts.len() != 3 {
@@ -1441,7 +1533,7 @@ fn format_date_label(date: &str) -> String {
     format!("{month} {day}, {}", parts[0])
 }
 
-/// Format time as just "HH:MM" for bubble timestamps.
+/// Format time as "HH:MM" for message timestamps.
 fn format_time_short(iso: &str) -> String {
     if iso.len() >= 16 {
         iso[11..16].to_string()
@@ -1450,7 +1542,7 @@ fn format_time_short(iso: &str) -> String {
     }
 }
 
-/// Format full time for search results etc.
+/// Format full time for search results: "Feb 17 13:43".
 fn format_time(iso: &str) -> String {
     if iso.len() >= 16 {
         let date_part = &iso[..10];
