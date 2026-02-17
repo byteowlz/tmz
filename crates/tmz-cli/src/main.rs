@@ -37,7 +37,8 @@ fn try_main() -> Result<()> {
             message,
             file,
             limit,
-        } => rt.block_on(handle_msg(&ctx, target, message, file, limit)),
+            no_images,
+        } => rt.block_on(handle_msg(&ctx, target, message, file, limit, no_images)),
         Command::Search { query, limit } => rt.block_on(handle_search(&ctx, &query, limit)),
         Command::Find { query, conv_type } => rt.block_on(handle_find(&ctx, &query, conv_type)),
         Command::Alias {
@@ -184,6 +185,9 @@ enum Command {
         /// Number of recent messages to show (default: 20).
         #[arg(short = 'n', long, default_value_t = 20)]
         limit: i64,
+        /// Disable inline image rendering (Kitty graphics protocol).
+        #[arg(long)]
+        no_images: bool,
     },
     /// Full-text search across cached messages.
     Search {
@@ -622,6 +626,7 @@ async fn handle_msg(
     message: Option<String>,
     file: Option<PathBuf>,
     limit: i64,
+    no_images: bool,
 ) -> Result<()> {
     let db = ctx.open_cache().await?;
     let conv_id = ctx.resolve_target(&db, &target).await?;
@@ -693,8 +698,33 @@ async fn handle_msg(
         println!();
     }
 
+    let show_images = !no_images && tmz_core::kitty::is_supported();
+    let client = if show_images {
+        TeamsClient::new().ok()
+    } else {
+        None
+    };
+
     for (i, msg) in messages.iter().enumerate() {
-        print_message(msg, if i > 0 { messages.get(i - 1) } else { None });
+        let prev = if i > 0 { messages.get(i - 1) } else { None };
+        print_message(msg, prev);
+
+        // Render inline images via Kitty protocol
+        if show_images {
+            let urls = tmz_core::kitty::extract_image_urls(&msg.content_html);
+            if let Some(ref client) = client {
+                for url in &urls {
+                    match client.download_image(url).await {
+                        Ok(data) => {
+                            if let Err(e) = tmz_core::kitty::display_image(&data) {
+                                debug!("kitty image render failed: {e}");
+                            }
+                        }
+                        Err(e) => debug!("image download failed: {e}"),
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
@@ -1194,13 +1224,16 @@ fn print_message(msg: &tmz_core::CachedMessage, prev: Option<&tmz_core::CachedMe
     }
 
     let content = msg.content.trim();
-    if content.is_empty() {
-        return;
-    }
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            println!("{trimmed}");
+    let has_images = !tmz_core::kitty::extract_image_urls(&msg.content_html).is_empty();
+
+    if content.is_empty() && has_images {
+        println!("\x1b[2m[image]\x1b[0m");
+    } else if !content.is_empty() {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                println!("{trimmed}");
+            }
         }
     }
 }

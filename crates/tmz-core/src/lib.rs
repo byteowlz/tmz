@@ -12,6 +12,7 @@ pub mod cache;
 pub mod config;
 pub mod daemon;
 pub mod error;
+pub mod kitty;
 pub mod paths;
 pub mod schema;
 pub mod teams;

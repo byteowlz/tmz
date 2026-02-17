@@ -603,6 +603,43 @@ impl TeamsClient {
             .await
             .map_err(|e| CoreError::Serialization(format!("parsing response: {e}")))
     }
+
+    /// Download an image from a Teams/ASM URL.
+    ///
+    /// These URLs require the skype token for authentication.
+    /// Returns the raw image bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if not authenticated, the request fails, or the URL
+    /// is not reachable.
+    pub async fn download_image(&self, url: &str) -> Result<Vec<u8>, CoreError> {
+        let tokens = self
+            .auth
+            .get_tokens()
+            .map_err(|e| CoreError::Auth(format!("not authenticated: {e}")))?;
+
+        let response = self
+            .http_client
+            .get(url)
+            .header("Authorization", format!("skypetoken={}", tokens.skype_token))
+            .send()
+            .await
+            .map_err(|e| CoreError::Api(format!("image download failed: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            return Err(CoreError::Api(format!(
+                "image download failed: {status}"
+            )));
+        }
+
+        response
+            .bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| CoreError::Api(format!("reading image bytes: {e}")))
+    }
 }
 
 /// Decode a skypeToken JWT to extract skype ID and expiry.
