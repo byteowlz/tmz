@@ -40,16 +40,3 @@ pub enum CoreError {
 
 /// Result type alias using `CoreError`.
 pub type Result<T> = std::result::Result<T, CoreError>;
-
-impl From<vault_core::CoreError> for CoreError {
-    fn from(e: vault_core::CoreError) -> Self {
-        match e {
-            vault_core::CoreError::Io(io_err) => Self::Io(io_err),
-            vault_core::CoreError::Path(s) => Self::Path(s),
-            vault_core::CoreError::Config(s) => Self::Config(s),
-            vault_core::CoreError::Serialization(s) => Self::Serialization(s),
-            vault_core::CoreError::Secret(s) => Self::Auth(s),
-            vault_core::CoreError::SecretNotFound(s) => Self::SecretNotFound(s),
-        }
-    }
-}

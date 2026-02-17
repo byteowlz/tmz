@@ -1,66 +1,79 @@
-//! Token storage using vault for secure credential management.
+//! Token storage using a plain JSON file.
+//!
+//! Tokens are short-lived JWTs (typically 1 hour) so heavyweight encryption
+//! is unnecessary. They are stored at `$XDG_STATE_HOME/tmz/tokens.json` with
+//! `0600` permissions (owner-only read/write).
 
 use crate::teams::models::TeamsTokens;
 use crate::CoreError;
-use vault_core::store::{SecretEntry, SecretStore, VaultStore};
-use std::collections::BTreeMap;
+use std::path::PathBuf;
 
-/// Storage for Teams authentication tokens using secure storage.
+/// Storage for Teams authentication tokens.
 #[derive(Debug)]
 pub struct TokenStorage {
-    service_name: String,
+    path: PathBuf,
 }
 
 impl TokenStorage {
-    /// Service name used for vault storage.
-    pub const SERVICE_NAME: &str = "tmz";
-    /// Key name for the main tokens entry.
-    pub const TOKEN_KEY: &str = "teams_tokens";
+    /// Token file name.
+    const FILENAME: &str = "tokens.json";
 
-    /// Create a new token storage instance.
-    #[must_use]
-pub fn new() -> Self {
-        Self {
-            service_name: Self::SERVICE_NAME.to_string(),
-        }
-    }
-
-    /// Store tokens in the secure storage.
+    /// Create a new token storage instance using the default state directory.
     ///
     /// # Errors
     ///
-    /// Returns an error if the vault is locked or write fails.
+    /// Returns an error if the state directory cannot be determined.
+    pub fn new() -> Result<Self, CoreError> {
+        let state_dir = crate::default_state_dir()
+            .map_err(|e| CoreError::Path(format!("resolving state dir: {e}")))?;
+        Ok(Self {
+            path: state_dir.join(Self::FILENAME),
+        })
+    }
+
+    /// Store tokens to disk.
+    ///
+    /// Creates parent directories and sets file permissions to `0600`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization or file I/O fails.
     pub fn store_tokens(&self, tokens: &TeamsTokens) -> Result<(), CoreError> {
-        let vault = Self::get_vault()?;
-        let json = serde_json::to_string(tokens)
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent).map_err(CoreError::Io)?;
+        }
+
+        let json = serde_json::to_string_pretty(tokens)
             .map_err(|e| CoreError::Serialization(format!("serializing tokens: {e}")))?;
 
-        let mut fields = BTreeMap::new();
-        fields.insert("value".to_string(), json);
+        std::fs::write(&self.path, json.as_bytes()).map_err(CoreError::Io)?;
 
-        let entry = SecretEntry::new(
-            &self.service_name,
-            Self::TOKEN_KEY,
-            fields,
-        );
+        // Restrict to owner read/write
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600))
+                .map_err(CoreError::Io)?;
+        }
 
-        vault.set(&self.service_name, Self::TOKEN_KEY, &entry)?;
         Ok(())
     }
 
-    /// Load tokens from the secure storage.
+    /// Load tokens from disk.
     ///
     /// # Errors
     ///
-    /// Returns an error if tokens are not found, vault is locked, or read fails.
+    /// Returns an error if the file does not exist, or parsing fails.
     pub fn load_tokens(&self) -> Result<TeamsTokens, CoreError> {
-        let vault = Self::get_vault()?;
-        let entry = vault.get(&self.service_name, Self::TOKEN_KEY)?;
-        let json = entry
-            .field("value")
-            .ok_or_else(|| CoreError::Auth("token field not found".to_string()))?;
+        if !self.path.exists() {
+            return Err(CoreError::SecretNotFound(
+                "no stored tokens. Run 'tmz auth login' first.".to_string(),
+            ));
+        }
 
-        serde_json::from_str(json)
+        let json = std::fs::read_to_string(&self.path).map_err(CoreError::Io)?;
+
+        serde_json::from_str(&json)
             .map_err(|e| CoreError::Serialization(format!("deserializing tokens: {e}")))
     }
 
@@ -68,7 +81,7 @@ pub fn new() -> Self {
     ///
     /// # Errors
     ///
-    /// Returns an error if vault access fails.
+    /// Returns an error if file I/O fails (missing file returns `Ok(false)`).
     pub fn has_valid_tokens(&self) -> Result<bool, CoreError> {
         match self.load_tokens() {
             Ok(tokens) => {
@@ -86,26 +99,11 @@ pub fn new() -> Self {
     ///
     /// # Errors
     ///
-    /// Returns an error if vault is locked or delete fails.
+    /// Returns an error if the file exists but cannot be removed.
     pub fn clear_tokens(&self) -> Result<(), CoreError> {
-        let vault = Self::get_vault()?;
-        vault
-            .delete(&self.service_name, Self::TOKEN_KEY)
-            .or_else(|e| match e {
-                vault_core::CoreError::SecretNotFound(_) => Ok(()),
-                _ => Err(e),
-            })?;
+        if self.path.exists() {
+            std::fs::remove_file(&self.path).map_err(CoreError::Io)?;
+        }
         Ok(())
-    }
-
-    fn get_vault() -> Result<VaultStore, CoreError> {
-        let vault_path = vault_core::store::central_vault_path()?;
-        Ok(VaultStore::new(vault_path))
-    }
-}
-
-impl Default for TokenStorage {
-    fn default() -> Self {
-        Self::new()
     }
 }

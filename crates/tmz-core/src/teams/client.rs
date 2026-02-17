@@ -36,9 +36,12 @@ impl TeamsClient {
             .build()
             .map_err(|e| CoreError::Other(format!("creating HTTP client: {e}")))?;
 
+        let auth = AuthManager::new()
+            .map_err(|e| CoreError::Other(format!("creating auth manager: {e}")))?;
+
         Ok(Self {
             http_client,
-            auth: AuthManager::new(),
+            auth,
         })
     }
 

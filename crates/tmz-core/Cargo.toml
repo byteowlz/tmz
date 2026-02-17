@@ -24,7 +24,6 @@ config.workspace = true
 dirs.workspace = true
 shellexpand.workspace = true
 schemars.workspace = true
-ext-core = { path = "/path/to/ext-crate" }
 base64 = "0.22"
 tokio.workspace = true
 reqwest = { version = "0.12", features = ["json"] }

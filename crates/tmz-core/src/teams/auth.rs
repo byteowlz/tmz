@@ -3,11 +3,11 @@
 //! This module provides authentication by:
 //! 1. Launching a Playwright-driven browser for user to login
 //! 2. Automatically extracting MSAL access tokens from localStorage
-//! 3. Storing tokens securely using vault
+//! 3. Storing tokens to `$XDG_STATE_HOME/tmz/tokens.json`
 //!
-//! The login flow uses a Node.js script (`scripts/teams-auth.mjs`) that
-//! opens Chromium, lets the user complete SSO/MFA, then extracts tokens
-//! and outputs them as JSON.
+//! After the first interactive login, SSO cookies are cached in a persistent
+//! browser profile. Subsequent token refreshes run headlessly - no user
+//! interaction required until the SSO session itself expires.
 
 use crate::teams::models::TeamsTokens;
 use crate::teams::storage::TokenStorage;
@@ -44,6 +44,13 @@ pub struct AuthManager {
     storage: TokenStorage,
 }
 
+/// How far before expiry to trigger a refresh (5 minutes).
+const REFRESH_BUFFER_SECS: i64 = 300;
+
+/// Timeout for headless refresh (seconds). SSO with cached cookies
+/// completes in a few seconds; if it takes longer, the session is stale.
+const HEADLESS_TIMEOUT_SECS: u64 = 30;
+
 impl AuthManager {
     /// Teams web client URL.
     pub const TEAMS_URL: &str = "https://teams.microsoft.com/v2";
@@ -51,26 +58,31 @@ impl AuthManager {
     pub const TEAMS_CLIENT_ID: &str = "5e3ce6c0-2b1f-4285-8d4b-75ee78787346";
 
     /// Create a new authentication manager.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            storage: TokenStorage::new(),
-        }
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the state directory cannot be determined.
+    pub fn new() -> Result<Self, AuthenticationError> {
+        Ok(Self {
+            storage: TokenStorage::new().map_err(AuthenticationError::StorageError)?,
+        })
     }
 
     /// Check if we have valid cached tokens.
     ///
     /// # Errors
     ///
-    /// Returns an error if vault access fails.
+    /// Returns an error if storage access fails.
     pub fn is_authenticated(&self) -> Result<bool, AuthenticationError> {
         Ok(self.storage.has_valid_tokens()?)
     }
 
     /// Run the Playwright-based browser login flow.
     ///
-    /// Launches `scripts/teams-auth.mjs` which opens Chromium, lets the user
-    /// complete SSO/MFA, extracts tokens from localStorage, and returns them.
+    /// # Arguments
+    ///
+    /// * `timeout_secs` - Maximum time to wait for login completion.
+    /// * `headless` - If true, run without a visible browser window.
     ///
     /// # Errors
     ///
@@ -79,6 +91,7 @@ impl AuthManager {
     pub async fn browser_login(
         &self,
         timeout_secs: Option<u64>,
+        headless: bool,
     ) -> Result<TeamsTokens, AuthenticationError> {
         let script_path = find_auth_script()?;
 
@@ -89,11 +102,19 @@ impl AuthManager {
             cmd.arg("--timeout").arg(t.to_string());
         }
 
+        if headless {
+            cmd.arg("--headless");
+        }
+
         // stdout = token JSON, stderr = progress/log messages
         cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::inherit());
+        cmd.stderr(if headless {
+            std::process::Stdio::null()
+        } else {
+            std::process::Stdio::inherit()
+        });
 
-        log::debug!("running auth script: {}", script_path.display());
+        log::debug!("running auth script: {} (headless={headless})", script_path.display());
 
         let output = cmd.output().await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -109,7 +130,11 @@ impl AuthManager {
 
         if !output.status.success() {
             return Err(AuthenticationError::TokenExtractionError(
-                "browser login failed or timed out - check stderr for details".to_string(),
+                if headless {
+                    "headless token refresh failed - SSO session may have expired. Run 'tmz auth login' to re-authenticate.".to_string()
+                } else {
+                    "browser login failed or timed out - check stderr for details".to_string()
+                },
             ));
         }
 
@@ -127,10 +152,81 @@ impl AuthManager {
         self.store_tokens_from_browser(&local_storage)
     }
 
-    /// Store tokens extracted from browser localStorage.
+    /// Silently refresh tokens using cached SSO cookies.
     ///
-    /// Takes a map of token keys to their JSON values from localStorage,
-    /// extracts the specific tokens needed, and stores them.
+    /// Runs the browser headlessly with a short timeout. If the SSO session
+    /// is still valid, fresh tokens are extracted without user interaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if headless refresh fails (SSO session expired).
+    pub async fn refresh_tokens(&self) -> Result<TeamsTokens, AuthenticationError> {
+        log::debug!("attempting headless token refresh");
+        self.browser_login(Some(HEADLESS_TIMEOUT_SECS), true).await
+    }
+
+    /// Get valid tokens, auto-refreshing if expired or about to expire.
+    ///
+    /// Resolution order:
+    /// 1. Return cached tokens if still valid (with buffer)
+    /// 2. Attempt headless refresh via cached SSO cookies
+    /// 3. Fail with a message to run `tmz auth login`
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no valid tokens are available and refresh fails.
+    pub async fn get_tokens_or_refresh(&self) -> Result<TeamsTokens, AuthenticationError> {
+        match self.storage.load_tokens() {
+            Ok(tokens) => {
+                let now = now_epoch();
+                if tokens.expires_at > now + REFRESH_BUFFER_SECS {
+                    return Ok(tokens);
+                }
+                // Tokens expired or expiring soon - try headless refresh
+                log::info!("tokens expired or expiring soon, refreshing...");
+                match self.refresh_tokens().await {
+                    Ok(fresh) => Ok(fresh),
+                    Err(_) => {
+                        // If tokens haven't fully expired yet, use them anyway
+                        if tokens.expires_at > now {
+                            log::warn!("headless refresh failed but tokens still valid for {}s", tokens.expires_at - now);
+                            Ok(tokens)
+                        } else {
+                            Err(AuthenticationError::TokenExtractionError(
+                                "tokens expired and headless refresh failed. Run 'tmz auth login'.".to_string(),
+                            ))
+                        }
+                    }
+                }
+            }
+            Err(CoreError::SecretNotFound(_)) => {
+                Err(AuthenticationError::TokenExtractionError(
+                    "not authenticated. Run 'tmz auth login' first.".to_string(),
+                ))
+            }
+            Err(e) => Err(AuthenticationError::StorageError(e)),
+        }
+    }
+
+    /// Get cached tokens without auto-refresh. Returns error if expired.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if tokens are not available or expired.
+    pub fn get_tokens(&self) -> Result<TeamsTokens, AuthenticationError> {
+        let tokens = self.storage.load_tokens()?;
+        let now = now_epoch();
+
+        if tokens.expires_at < now {
+            return Err(AuthenticationError::TokenExtractionError(
+                "tokens expired. Run 'tmz auth login' or any command to auto-refresh.".to_string(),
+            ));
+        }
+
+        Ok(tokens)
+    }
+
+    /// Store tokens extracted from browser localStorage.
     ///
     /// # Errors
     ///
@@ -139,13 +235,11 @@ impl AuthManager {
         &self,
         local_storage: &std::collections::HashMap<String, String>,
     ) -> Result<TeamsTokens, AuthenticationError> {
-        // Find tokens for specific resources
         let skype_token_json = Self::find_token(local_storage, "api.spaces.skype.com")?;
         let chat_token_json = Self::find_token(local_storage, "chatsvcagg.teams.microsoft.com")?;
         let graph_token_json = Self::find_token(local_storage, "graph.microsoft.com")?;
         let presence_token_json = Self::find_token(local_storage, "presence.teams.microsoft.com")?;
 
-        // Parse MSAL token structures
         let skype_token: MsalToken = serde_json::from_str(&skype_token_json)
             .map_err(|e| AuthenticationError::TokenExtractionError(format!("parsing skype token: {e}")))?;
         let chat_token: MsalToken = serde_json::from_str(&chat_token_json)
@@ -155,7 +249,6 @@ impl AuthManager {
         let presence_token: MsalToken = serde_json::from_str(&presence_token_json)
             .map_err(|e| AuthenticationError::TokenExtractionError(format!("parsing presence token: {e}")))?;
 
-        // Extract claims from skype token
         let (tenant_id, user_id, upn, expires_at) = parse_token_claims(&skype_token.secret)?;
 
         let tokens = TeamsTokens {
@@ -212,26 +305,6 @@ impl AuthManager {
         Ok(())
     }
 
-    /// Get cached tokens if available and valid.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if tokens are not available or storage access fails.
-    pub fn get_tokens(&self) -> Result<TeamsTokens, AuthenticationError> {
-        let tokens = self.storage.load_tokens()?;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as i64);
-
-        if tokens.expires_at < now {
-            return Err(AuthenticationError::TokenExtractionError(
-                "Token expired - run 'tmz auth login' to refresh".to_string(),
-            ));
-        }
-
-        Ok(tokens)
-    }
-
     fn find_token(
         local_storage: &std::collections::HashMap<String, String>,
         resource: &str,
@@ -252,14 +325,13 @@ impl AuthManager {
     }
 }
 
-impl Default for AuthManager {
-    fn default() -> Self {
-        Self::new()
-    }
+fn now_epoch() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
 }
 
 fn parse_token_claims(token: &str) -> Result<(String, String, String, i64), AuthenticationError> {
-    // Parse JWT to extract claims
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
         return Err(AuthenticationError::JwtError(
@@ -302,7 +374,6 @@ fn parse_token_claims(token: &str) -> Result<(String, String, String, i64), Auth
 /// 2. Next to the current executable (`../scripts/teams-auth.mjs`)
 /// 3. Relative to the workspace root (for development)
 fn find_auth_script() -> Result<std::path::PathBuf, AuthenticationError> {
-    // 1. Explicit env override
     if let Ok(p) = std::env::var("TMZ_AUTH_SCRIPT") {
         let path = std::path::PathBuf::from(p);
         if path.exists() {
@@ -310,12 +381,9 @@ fn find_auth_script() -> Result<std::path::PathBuf, AuthenticationError> {
         }
     }
 
-    // 2. Next to installed binary: <prefix>/bin/tmz-cli -> <prefix>/share/tmz/teams-auth.mjs
     if let Ok(exe) = std::env::current_exe()
         && let Some(bin_dir) = exe.parent()
     {
-        // dev layout: target/debug/tmz-cli -> scripts/teams-auth.mjs
-        // check several levels up for the workspace root
         for ancestor in bin_dir.ancestors().take(6) {
             let candidate = ancestor.join("scripts").join("teams-auth.mjs");
             if candidate.exists() {
@@ -323,7 +391,6 @@ fn find_auth_script() -> Result<std::path::PathBuf, AuthenticationError> {
             }
         }
 
-        // installed layout: bin/tmz-cli -> share/tmz/teams-auth.mjs
         let share_candidate = bin_dir
             .parent()
             .map(|prefix| prefix.join("share").join("tmz").join("teams-auth.mjs"));

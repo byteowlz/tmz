@@ -10,6 +10,7 @@
 
 pub mod cache;
 pub mod config;
+pub mod daemon;
 pub mod error;
 pub mod paths;
 pub mod schema;
@@ -18,7 +19,7 @@ pub mod teams;
 pub use cache::{Cache, CachedConversation, CachedMessage, SearchResult};
 pub use config::{AppConfig, LogLevel, LoggingConfig, PathsConfig, RuntimeConfig};
 pub use error::{CoreError, Result};
-pub use paths::{AppPaths, default_cache_dir};
+pub use paths::{AppPaths, default_cache_dir, default_data_dir, default_state_dir};
 pub use schema::{generate_example_config, generate_schema, write_generated_files};
 pub use teams::{AuthManager, TeamsClient, TeamsTokens};
 

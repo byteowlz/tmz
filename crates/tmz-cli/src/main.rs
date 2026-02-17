@@ -46,6 +46,7 @@ fn try_main() -> Result<()> {
             conv_type,
         } => rt.block_on(handle_alias(&ctx, &name, target, conv_type)),
         Command::Teams { subcommand } => rt.block_on(handle_teams(&ctx, subcommand)),
+        Command::Service { command } => rt.block_on(handle_service(&ctx, command)),
         Command::Init(cmd) => handle_init(&ctx, cmd),
         Command::Config { command } => handle_config(&ctx, command),
         Command::Completions { shell } => {
@@ -217,6 +218,11 @@ enum Command {
     },
     /// Create config directories and default files.
     Init(InitCommand),
+    /// Background daemon for token refresh and sync.
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
     /// Inspect and manage configuration.
     Config {
         #[command(subcommand)]
@@ -308,6 +314,24 @@ enum ConfigCommand {
     Schema,
     /// Regenerate the default configuration file.
     Reset,
+}
+
+#[derive(Debug, Clone, Copy, Subcommand)]
+enum ServiceCommand {
+    /// Start the background daemon.
+    Start,
+    /// Stop the background daemon.
+    Stop,
+    /// Restart the background daemon.
+    Restart,
+    /// Show daemon status.
+    Status,
+    /// Install as login service (launchd on macOS, systemd on Linux).
+    Enable,
+    /// Uninstall the login service.
+    Disable,
+    /// Run the daemon in the foreground (for debugging).
+    Run,
 }
 
 // ─── Runtime ─────────────────────────────────────────────────────────
@@ -439,7 +463,7 @@ impl RuntimeContext {
 // ─── Handlers ────────────────────────────────────────────────────────
 
 async fn handle_auth(_ctx: &RuntimeContext, cmd: AuthSubcommand) -> Result<()> {
-    let auth = AuthManager::new();
+    let auth = AuthManager::new()?;
 
     match cmd {
         AuthSubcommand::Status => {
@@ -448,6 +472,16 @@ async fn handle_auth(_ctx: &RuntimeContext, cmd: AuthSubcommand) -> Result<()> {
                     let tokens = auth.get_tokens()?;
                     println!("Authenticated as: {}", tokens.user_principal_name);
                     println!("Tenant ID:        {}", tokens.tenant_id);
+
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_secs() as i64);
+                    let remaining = tokens.expires_at - now;
+                    if remaining > 0 {
+                        let mins = remaining / 60;
+                        let secs = remaining % 60;
+                        println!("Token expires:    {mins}m {secs}s remaining");
+                    }
                 }
                 Ok(false) => {
                     println!("Not authenticated. Run 'tmz auth login' to authenticate.");
@@ -468,7 +502,7 @@ async fn handle_auth(_ctx: &RuntimeContext, cmd: AuthSubcommand) -> Result<()> {
                 return Ok(());
             }
 
-            let tokens = auth.browser_login(Some(timeout)).await?;
+            let tokens = auth.browser_login(Some(timeout), false).await?;
             println!("Authenticated as: {}", tokens.user_principal_name);
             println!("Tenant: {}", tokens.tenant_id);
             Ok(())
@@ -852,6 +886,176 @@ async fn handle_teams(ctx: &RuntimeContext, cmd: TeamsSubcommand) -> Result<()> 
             Ok(())
         }
     }
+}
+
+async fn handle_service(ctx: &RuntimeContext, cmd: ServiceCommand) -> Result<()> {
+    use tmz_core::daemon;
+
+    match cmd {
+        ServiceCommand::Start => service_start(),
+        ServiceCommand::Stop => {
+            daemon::stop_daemon()?;
+            println!("Daemon stopped.");
+            Ok(())
+        }
+        ServiceCommand::Restart => {
+            if daemon::is_running()? {
+                daemon::stop_daemon()?;
+                println!("Daemon stopped.");
+            }
+            service_start()
+        }
+        ServiceCommand::Status => service_status(ctx),
+        ServiceCommand::Enable => service_enable(),
+        ServiceCommand::Disable => service_disable(),
+        ServiceCommand::Run => daemon::run_daemon().await.map_err(|e| anyhow!("{e}")),
+    }
+}
+
+fn service_start() -> Result<()> {
+    use tmz_core::daemon;
+
+    if daemon::is_running()? {
+        println!(
+            "Daemon is already running (pid={}).",
+            daemon::read_pid()?.unwrap_or(0)
+        );
+        return Ok(());
+    }
+
+    let exe =
+        std::env::current_exe().map_err(|e| anyhow!("cannot determine executable path: {e}"))?;
+    let log_path = daemon::log_file_path()?;
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+
+    let child = std::process::Command::new(exe)
+        .args(["service", "run"])
+        .stdin(std::process::Stdio::null())
+        .stdout(log_file.try_clone()?)
+        .stderr(log_file)
+        .spawn()?;
+
+    println!("Daemon started (pid={}).", child.id());
+    println!("Log: {}", log_path.display());
+    Ok(())
+}
+
+fn service_status(_ctx: &RuntimeContext) -> Result<()> {
+    use tmz_core::daemon;
+
+    if daemon::is_running()? {
+        let pid = daemon::read_pid()?.unwrap_or(0);
+        let log_path = daemon::log_file_path()?;
+        println!("running  (pid={pid})");
+        println!("log:     {}", log_path.display());
+
+        let auth = AuthManager::new()?;
+        match auth.get_tokens() {
+            Ok(tokens) => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs() as i64);
+                let remaining = tokens.expires_at - now;
+                if remaining > 0 {
+                    let mins = remaining / 60;
+                    let secs = remaining % 60;
+                    println!("tokens:  valid ({mins}m {secs}s remaining)");
+                } else {
+                    println!("tokens:  expired");
+                }
+            }
+            Err(_) => println!("tokens:  none"),
+        }
+    } else {
+        println!("stopped");
+    }
+    Ok(())
+}
+
+fn service_enable() -> Result<()> {
+    use tmz_core::daemon;
+
+    let exe =
+        std::env::current_exe().map_err(|e| anyhow!("cannot determine executable path: {e}"))?;
+    let exe_str = exe.to_string_lossy();
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
+
+    if cfg!(target_os = "macos") {
+        let plist_dir = home.join("Library/LaunchAgents");
+        std::fs::create_dir_all(&plist_dir)?;
+        let plist_path = plist_dir.join("de.byteowlz.tmz.plist");
+        std::fs::write(&plist_path, daemon::launchd_plist(&exe_str))?;
+
+        let status = std::process::Command::new("launchctl")
+            .args(["load", "-w"])
+            .arg(&plist_path)
+            .status()?;
+        if status.success() {
+            println!("Service enabled (launchd).");
+            println!("Plist: {}", plist_path.display());
+        } else {
+            return Err(anyhow!("launchctl load failed"));
+        }
+    } else {
+        let unit_dir = home.join(".config/systemd/user");
+        std::fs::create_dir_all(&unit_dir)?;
+        let unit_path = unit_dir.join("tmz.service");
+        std::fs::write(&unit_path, daemon::systemd_unit(&exe_str))?;
+
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status();
+        let status = std::process::Command::new("systemctl")
+            .args(["--user", "enable", "--now", "tmz.service"])
+            .status()?;
+        if status.success() {
+            println!("Service enabled (systemd).");
+            println!("Unit: {}", unit_path.display());
+        } else {
+            return Err(anyhow!("systemctl enable failed"));
+        }
+    }
+    Ok(())
+}
+
+fn service_disable() -> Result<()> {
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
+
+    if cfg!(target_os = "macos") {
+        let plist_path = home.join("Library/LaunchAgents/de.byteowlz.tmz.plist");
+        if plist_path.exists() {
+            let _ = std::process::Command::new("launchctl")
+                .args(["unload", "-w"])
+                .arg(&plist_path)
+                .status();
+            std::fs::remove_file(&plist_path)?;
+            println!("Service disabled (launchd).");
+        } else {
+            println!("Service not installed.");
+        }
+    } else {
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "disable", "--now", "tmz.service"])
+            .status();
+        let unit_path = home.join(".config/systemd/user/tmz.service");
+        if unit_path.exists() {
+            std::fs::remove_file(&unit_path)?;
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "daemon-reload"])
+                .status();
+        }
+        println!("Service disabled (systemd).");
+    }
+    Ok(())
 }
 
 fn handle_init(ctx: &RuntimeContext, cmd: InitCommand) -> Result<()> {
