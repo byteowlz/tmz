@@ -670,10 +670,12 @@ async fn handle_msg(
             return Ok(());
         }
         if let Some(msgs) = data["messages"].as_array() {
-            for msg in msgs {
-                if let Some(cached) = cache::parse_message(msg, &conv_id) {
-                    print_message(&cached);
-                }
+            let parsed: Vec<_> = msgs
+                .iter()
+                .filter_map(|m| cache::parse_message(m, &conv_id))
+                .collect();
+            for (i, msg) in parsed.iter().enumerate() {
+                print_message(msg, if i > 0 { parsed.get(i - 1) } else { None });
             }
         }
         return Ok(());
@@ -687,12 +689,12 @@ async fn handle_msg(
     // Print header
     let convs = db.find_conversation(&conv_id).await?;
     if let Some(conv) = convs.first() {
-        println!("--- {} ---", conv.display_name);
+        println!("\x1b[1m{}\x1b[0m", conv.display_name);
         println!();
     }
 
-    for msg in &messages {
-        print_message(msg);
+    for (i, msg) in messages.iter().enumerate() {
+        print_message(msg, if i > 0 { messages.get(i - 1) } else { None });
     }
 
     Ok(())
@@ -1162,7 +1164,7 @@ fn print_conversation_list(convs: &[tmz_core::CachedConversation]) {
     }
 }
 
-fn print_message(msg: &tmz_core::CachedMessage) {
+fn print_message(msg: &tmz_core::CachedMessage, prev: Option<&tmz_core::CachedMessage>) {
     let time = format_time(&msg.compose_time);
     let name = if msg.from_display_name.is_empty() {
         "(system)"
@@ -1170,13 +1172,46 @@ fn print_message(msg: &tmz_core::CachedMessage) {
         &msg.from_display_name
     };
 
-    if msg.is_from_me {
-        println!("  {time}  \x1b[36m{name}\x1b[0m");
-    } else {
-        println!("  {time}  \x1b[33m{name}\x1b[0m");
+    // Add a blank line when the sender changes or after a time gap
+    let new_sender = prev.is_none_or(|p| p.from_display_name != msg.from_display_name);
+    let time_gap = prev.is_some_and(|p| {
+        // Gap > 30 minutes between messages
+        time_diff_secs(&p.compose_time, &msg.compose_time) > 1800
+    });
+
+    if new_sender || time_gap {
+        if prev.is_some() {
+            println!();
+        }
+        let colored_name = if msg.is_from_me {
+            format!("\x1b[36m{name}\x1b[0m")
+        } else {
+            format!("\x1b[33m{name}\x1b[0m")
+        };
+        println!("{colored_name}  \x1b[2m{time}\x1b[0m");
     }
-    println!("    {}", msg.content);
-    println!();
+
+    // Wrap long lines
+    let content = msg.content.trim();
+    if content.is_empty() {
+        return;
+    }
+    for line in content.lines() {
+        println!("  {line}");
+    }
+}
+
+fn time_diff_secs(a: &str, b: &str) -> i64 {
+    let parse = |s: &str| -> Option<i64> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .or_else(|_| chrono::DateTime::parse_from_rfc3339(&format!("{s}Z")))
+            .ok()
+            .map(|d| d.timestamp())
+    };
+    match (parse(a), parse(b)) {
+        (Some(ta), Some(tb)) => (tb - ta).abs(),
+        _ => 0,
+    }
 }
 
 fn format_time(iso: &str) -> String {
