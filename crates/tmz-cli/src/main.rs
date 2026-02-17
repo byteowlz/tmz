@@ -1172,10 +1172,8 @@ fn print_message(msg: &tmz_core::CachedMessage, prev: Option<&tmz_core::CachedMe
         &msg.from_display_name
     };
 
-    // Add a blank line when the sender changes or after a time gap
     let new_sender = prev.is_none_or(|p| p.from_display_name != msg.from_display_name);
     let time_gap = prev.is_some_and(|p| {
-        // Gap > 30 minutes between messages
         time_diff_secs(&p.compose_time, &msg.compose_time) > 1800
     });
 
@@ -1183,21 +1181,27 @@ fn print_message(msg: &tmz_core::CachedMessage, prev: Option<&tmz_core::CachedMe
         if prev.is_some() {
             println!();
         }
+        // Name left, timestamp right-aligned to ~72 cols
+        let name_len = name.len();
+        let time_len = time.len();
+        let pad = 72_usize.saturating_sub(name_len + time_len);
         let colored_name = if msg.is_from_me {
-            format!("\x1b[36m{name}\x1b[0m")
+            format!("\x1b[1;36m{name}\x1b[0m")
         } else {
-            format!("\x1b[33m{name}\x1b[0m")
+            format!("\x1b[1;33m{name}\x1b[0m")
         };
-        println!("{colored_name}  \x1b[2m{time}\x1b[0m");
+        println!("{colored_name}{:>pad$}\x1b[2m{time}\x1b[0m", "");
     }
 
-    // Wrap long lines
     let content = msg.content.trim();
     if content.is_empty() {
         return;
     }
     for line in content.lines() {
-        println!("  {line}");
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            println!("{trimmed}");
+        }
     }
 }
 

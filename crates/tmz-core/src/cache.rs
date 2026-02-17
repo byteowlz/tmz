@@ -438,49 +438,122 @@ fn row_to_message(row: &sqlx::sqlite::SqliteRow) -> CachedMessage {
     }
 }
 
-/// Strip HTML tags from a string, producing plain text.
+/// Convert Teams HTML message to readable plain text.
+///
+/// Handles block elements (`<p>`, `<br>`, `<div>`), strips quoted replies
+/// (`<blockquote>`), decodes HTML entities, and collapses whitespace.
 #[must_use]
 pub fn strip_html(html: &str) -> String {
-    let mut result = String::with_capacity(html.len());
-    let mut in_tag = false;
-    let mut last_was_space = false;
+    // Pre-process: insert newlines for block-level elements
+    let mut s = html.to_string();
 
-    for ch in html.chars() {
+    // Remove blockquote sections entirely (quoted reply context)
+    while let Some(start) = s.find("<blockquote") {
+        if let Some(end) = s[start..].find("</blockquote>") {
+            s = format!("{}{}", &s[..start], &s[start + end + "</blockquote>".len()..]);
+        } else {
+            break;
+        }
+    }
+
+    // Block-level tags -> newline
+    for tag in &["<br>", "<br/>", "<br />", "</p>", "</div>", "</li>"] {
+        s = s.replace(tag, "\n");
+    }
+
+    // Opening block tags that shouldn't add extra newlines
+    for tag_prefix in &["<p", "<div", "<li"] {
+        while let Some(pos) = s.find(tag_prefix) {
+            if let Some(end) = s[pos..].find('>') {
+                s = format!("{}{}", &s[..pos], &s[pos + end + 1..]);
+            } else {
+                break;
+            }
+        }
+    }
+
+    // Strip remaining HTML tags
+    let mut result = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for ch in s.chars() {
         match ch {
             '<' => in_tag = true,
-            '>' => {
-                in_tag = false;
-                // Replace block-level tags with newlines
-                if !last_was_space {
-                    result.push(' ');
-                    last_was_space = true;
-                }
-            }
-            _ if !in_tag => {
-                if ch.is_whitespace() {
-                    if !last_was_space {
-                        result.push(' ');
-                        last_was_space = true;
-                    }
-                } else {
-                    result.push(ch);
-                    last_was_space = false;
-                }
-            }
+            '>' => in_tag = false,
+            _ if !in_tag => result.push(ch),
             _ => {}
         }
     }
 
-    // Decode common HTML entities
-    result
+    // Decode HTML entities
+    let result = result
         .replace("&amp;", "&")
         .replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&#39;", "'")
-        .replace("&nbsp;", " ")
+        .replace("&nbsp;", " ");
+
+    // Decode numeric entities (&#128077; etc.)
+    let result = decode_numeric_entities(&result);
+
+    // Clean up whitespace: collapse spaces within lines, trim blank lines
+    result
+        .lines()
+        .map(|line| {
+            // Collapse runs of spaces/tabs within each line
+            let mut collapsed = String::new();
+            let mut last_was_space = false;
+            for ch in line.chars() {
+                if ch == ' ' || ch == '\t' {
+                    if !last_was_space && !collapsed.is_empty() {
+                        collapsed.push(' ');
+                        last_was_space = true;
+                    }
+                } else {
+                    collapsed.push(ch);
+                    last_was_space = false;
+                }
+            }
+            collapsed.trim_end().to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
         .trim()
         .to_string()
+}
+
+/// Decode numeric HTML entities like `&#128077;` to their Unicode characters.
+fn decode_numeric_entities(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '&' && chars.peek() == Some(&'#') {
+            chars.next(); // consume '#'
+            let mut num_str = String::new();
+            for digit in chars.by_ref() {
+                if digit == ';' {
+                    break;
+                }
+                num_str.push(digit);
+            }
+            if let Ok(code) = num_str.parse::<u32>()
+                && let Some(c) = char::from_u32(code)
+            {
+                result.push(c);
+                continue;
+            }
+            // Failed to parse - put it back as-is
+            result.push('&');
+            result.push('#');
+            result.push_str(&num_str);
+            result.push(';');
+        } else {
+            result.push(ch);
+        }
+    }
+
+    result
 }
 
 /// Parse a Teams API conversation JSON object into a `CachedConversation`.
