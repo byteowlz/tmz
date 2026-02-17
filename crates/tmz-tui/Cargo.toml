@@ -1,0 +1,28 @@
+[package]
+name = "tmz-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "TUI interface for the rust-workspace template"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tmz-tui"
+path = "src/main.rs"
+
+[dependencies]
+tmz-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+env_logger.workspace = true
+log.workspace = true
+ratatui.workspace = true
+serde.workspace = true
+tokio.workspace = true

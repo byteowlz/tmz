@@ -1,0 +1,32 @@
+[package]
+name = "tmz-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Microsoft Teams CLI - chat, search, and manage Teams from the terminal"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tmz"
+path = "src/main.rs"
+
+[dependencies]
+tmz-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+clap_complete.workspace = true
+env_logger.workspace = true
+log.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+toml.workspace = true
+tokio.workspace = true
+chrono = "0.4"
+open = "5"

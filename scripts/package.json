@@ -1,0 +1,10 @@
+{
+  "name": "tmz-scripts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser automation scripts for tmz authentication",
+  "dependencies": {
+    "playwright": "^1.58.0"
+  }
+}
