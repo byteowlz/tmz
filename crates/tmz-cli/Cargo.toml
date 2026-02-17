@@ -31,3 +31,5 @@ tokio.workspace = true
 chrono = "0.4"
 dirs.workspace = true
 open = "5"
+terminal_size = "0.4"
+unicode-width = "0.2"

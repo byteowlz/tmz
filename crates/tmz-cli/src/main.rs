@@ -679,8 +679,11 @@ async fn handle_msg(
                 .iter()
                 .filter_map(|m| cache::parse_message(m, &conv_id))
                 .collect();
-            for (i, msg) in parsed.iter().enumerate() {
-                print_message(msg, if i > 0 { parsed.get(i - 1) } else { None });
+            let groups = group_messages(&parsed);
+            let mut prev_g: Option<&MessageGroup<'_>> = None;
+            for g in &groups {
+                print_bubble(g, prev_g);
+                prev_g = Some(g);
             }
         }
         return Ok(());
@@ -705,14 +708,19 @@ async fn handle_msg(
         None
     };
 
-    for (i, msg) in messages.iter().enumerate() {
-        let prev = if i > 0 { messages.get(i - 1) } else { None };
-        print_message(msg, prev);
+    // Group consecutive messages from the same sender into bubbles
+    let groups = group_messages(&messages);
+    let mut prev_group: Option<&MessageGroup<'_>> = None;
 
-        // Render inline images via Kitty protocol
-        if show_images {
-            let urls = tmz_core::kitty::extract_image_urls(&msg.content_html);
-            if let Some(ref client) = client {
+    for group in &groups {
+        print_bubble(group, prev_group);
+
+        // Render inline images via Kitty protocol after the bubble
+        if show_images
+            && let Some(ref client) = client
+        {
+            for msg in &group.messages {
+                let urls = tmz_core::kitty::extract_image_urls(&msg.content_html);
                 for url in &urls {
                     match client.download_image(url).await {
                         Ok(data) => {
@@ -725,6 +733,8 @@ async fn handle_msg(
                 }
             }
         }
+
+        prev_group = Some(group);
     }
 
     Ok(())
@@ -1194,69 +1204,257 @@ fn print_conversation_list(convs: &[tmz_core::CachedConversation]) {
     }
 }
 
-fn print_message(msg: &tmz_core::CachedMessage, prev: Option<&tmz_core::CachedMessage>) {
-    let time = format_time(&msg.compose_time);
-    let name = if msg.from_display_name.is_empty() {
-        "(system)"
-    } else {
-        &msg.from_display_name
-    };
+/// Terminal width, clamped to a reasonable range.
+fn term_width() -> usize {
+    terminal_size::terminal_size()
+        .map_or(80, |(w, _)| usize::from(w.0))
+        .clamp(40, 200)
+}
 
-    let new_sender = prev.is_none_or(|p| p.from_display_name != msg.from_display_name);
-    let time_gap = prev.is_some_and(|p| {
-        time_diff_secs(&p.compose_time, &msg.compose_time) > 1800
-    });
+/// A group of consecutive messages from the same sender.
+struct MessageGroup<'a> {
+    sender: &'a str,
+    is_from_me: bool,
+    messages: Vec<&'a tmz_core::CachedMessage>,
+}
 
-    if new_sender || time_gap {
-        if prev.is_some() {
-            println!();
-        }
-        // Name left, timestamp right-aligned to ~72 cols
-        let name_len = name.len();
-        let time_len = time.len();
-        let pad = 72_usize.saturating_sub(name_len + time_len);
-        let colored_name = if msg.is_from_me {
-            format!("\x1b[1;36m{name}\x1b[0m")
-        } else {
-            format!("\x1b[1;33m{name}\x1b[0m")
-        };
-        println!("{colored_name}{:>pad$}\x1b[2m{time}\x1b[0m", "");
+impl MessageGroup<'_> {
+    fn first_date(&self) -> String {
+        self.messages
+            .first()
+            .map(|m| extract_date(&m.compose_time))
+            .unwrap_or_default()
     }
 
-    let content = msg.content.trim();
-    let has_images = !tmz_core::kitty::extract_image_urls(&msg.content_html).is_empty();
+    fn last_time(&self) -> String {
+        self.messages
+            .last()
+            .map(|m| format_time_short(&m.compose_time))
+            .unwrap_or_default()
+    }
+}
 
-    if content.is_empty() && has_images {
-        println!("\x1b[2m[image]\x1b[0m");
-    } else if !content.is_empty() {
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if !trimmed.is_empty() {
-                println!("{trimmed}");
+/// Group consecutive messages from the same sender.
+fn group_messages(messages: &[tmz_core::CachedMessage]) -> Vec<MessageGroup<'_>> {
+    let mut groups: Vec<MessageGroup<'_>> = Vec::new();
+
+    for msg in messages {
+        let same_sender = groups.last().is_some_and(|g| {
+            g.sender == msg.from_display_name
+                && g.first_date() == extract_date(&msg.compose_time)
+        });
+
+        if same_sender {
+            if let Some(last) = groups.last_mut() {
+                last.messages.push(msg);
+            }
+        } else {
+            groups.push(MessageGroup {
+                sender: if msg.from_display_name.is_empty() {
+                    "(system)"
+                } else {
+                    &msg.from_display_name
+                },
+                is_from_me: msg.is_from_me,
+                messages: vec![msg],
+            });
+        }
+    }
+
+    groups
+}
+
+/// Print a date separator when the day changes.
+fn maybe_print_date_separator(date: &str, prev_date: Option<&str>) {
+    if prev_date == Some(date) {
+        return;
+    }
+    let label = format_date_label(date);
+    let w = term_width();
+    let pad_total = w.saturating_sub(label.len() + 6);
+    let left = pad_total / 2;
+    let right = pad_total - left;
+    println!();
+    println!(
+        "\x1b[2m{:->left$} {label} {:->right$}\x1b[0m",
+        "", ""
+    );
+    println!();
+}
+
+/// Render a message group as a single colored bubble.
+fn print_bubble(group: &MessageGroup<'_>, prev: Option<&MessageGroup<'_>>) {
+    let prev_date = prev.map(MessageGroup::first_date);
+    maybe_print_date_separator(&group.first_date(), prev_date.as_deref());
+
+    // Gather all content lines from all messages in the group
+    let mut lines: Vec<String> = Vec::new();
+    for msg in &group.messages {
+        let content = msg.content.trim();
+        let has_images = !tmz_core::kitty::extract_image_urls(&msg.content_html).is_empty();
+
+        if !content.is_empty() {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    lines.push(trimmed.to_string());
+                }
+            }
+        } else if has_images {
+            lines.push("[image]".to_string());
+        }
+    }
+
+    if lines.is_empty() {
+        return;
+    }
+
+    let time = group.last_time();
+    let name = group.sender;
+    let w = term_width();
+    let max_bubble = w * 3 / 4;
+    let max_content = max_bubble.saturating_sub(4);
+
+    let wrapped = wrap_lines(&lines, max_content);
+
+    let content_width = wrapped.iter().map(|l| visible_len(l)).max().unwrap_or(0);
+    let inner_w = content_width
+        .max(visible_len(name))
+        .max(visible_len(&time))
+        .min(max_content);
+    let bubble_w = inner_w + 4;
+
+    let (bg, name_color) = if group.is_from_me {
+        ("48;5;24", "1;36")
+    } else {
+        ("48;5;238", "1;33")
+    };
+
+    let indent = if group.is_from_me {
+        w.saturating_sub(bubble_w)
+    } else {
+        1
+    };
+    let pad = " ".repeat(indent);
+
+    if prev.is_some() && prev_date.as_deref() == Some(&group.first_date()) {
+        println!();
+    }
+
+    // Name header
+    let name_pad = inner_w.saturating_sub(visible_len(name));
+    println!(
+        "{pad}\x1b[{bg}m  \x1b[{name_color}m{name}\x1b[0;{bg}m{:name_pad$}  \x1b[0m",
+        ""
+    );
+
+    // Content
+    for line in &wrapped {
+        let line_pad = inner_w.saturating_sub(visible_len(line));
+        println!(
+            "{pad}\x1b[{bg};37m  {line}{:line_pad$}  \x1b[0m",
+            ""
+        );
+    }
+
+    // Timestamp (right-aligned, dimmed)
+    let time_pad = inner_w.saturating_sub(visible_len(&time));
+    println!(
+        "{pad}\x1b[{bg};2m  {:time_pad$}{time}  \x1b[0m",
+        ""
+    );
+}
+
+/// Wrap lines to fit a maximum width.
+fn wrap_lines(lines: &[String], max_width: usize) -> Vec<String> {
+    let mut result = Vec::new();
+    for line in lines {
+        if visible_len(line) <= max_width {
+            result.push(line.clone());
+        } else {
+            // Simple word wrap
+            let mut current = String::new();
+            for word in line.split_whitespace() {
+                if current.is_empty() {
+                    current = word.to_string();
+                } else if visible_len(&current) + 1 + visible_len(word) <= max_width {
+                    current.push(' ');
+                    current.push_str(word);
+                } else {
+                    result.push(current);
+                    current = word.to_string();
+                }
+            }
+            if !current.is_empty() {
+                result.push(current);
             }
         }
     }
+    result
 }
 
-fn time_diff_secs(a: &str, b: &str) -> i64 {
-    let parse = |s: &str| -> Option<i64> {
-        chrono::DateTime::parse_from_rfc3339(s)
-            .or_else(|_| chrono::DateTime::parse_from_rfc3339(&format!("{s}Z")))
-            .ok()
-            .map(|d| d.timestamp())
+/// Visible length of a string (ignoring ANSI escape sequences).
+fn visible_len(s: &str) -> usize {
+    let mut len = 0;
+    let mut in_escape = false;
+    for ch in s.chars() {
+        if in_escape {
+            if ch.is_ascii_alphabetic() {
+                in_escape = false;
+            }
+        } else if ch == '\x1b' {
+            in_escape = true;
+        } else {
+            len += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        }
+    }
+    len
+}
+
+/// Extract the date portion "2026-02-17" from an ISO timestamp.
+fn extract_date(iso: &str) -> String {
+    iso.get(..10).unwrap_or(iso).to_string()
+}
+
+/// Format a date string like "2026-02-17" into a readable label.
+fn format_date_label(date: &str) -> String {
+    let parts: Vec<&str> = date.split('-').collect();
+    if parts.len() != 3 {
+        return date.to_string();
+    }
+    let month = match parts[1] {
+        "01" => "January",
+        "02" => "February",
+        "03" => "March",
+        "04" => "April",
+        "05" => "May",
+        "06" => "June",
+        "07" => "July",
+        "08" => "August",
+        "09" => "September",
+        "10" => "October",
+        "11" => "November",
+        "12" => "December",
+        _ => return date.to_string(),
     };
-    match (parse(a), parse(b)) {
-        (Some(ta), Some(tb)) => (tb - ta).abs(),
-        _ => 0,
+    let day = parts[2].trim_start_matches('0');
+    format!("{month} {day}, {}", parts[0])
+}
+
+/// Format time as just "HH:MM" for bubble timestamps.
+fn format_time_short(iso: &str) -> String {
+    if iso.len() >= 16 {
+        iso[11..16].to_string()
+    } else {
+        iso.to_string()
     }
 }
 
+/// Format full time for search results etc.
 fn format_time(iso: &str) -> String {
-    // Parse "2026-02-17T13:43:40.8930000Z" -> "Feb 17 13:43"
     if iso.len() >= 16 {
         let date_part = &iso[..10];
         let time_part = &iso[11..16];
-        // Try to make a nicer date
         if let Some(month_day) = parse_month_day(date_part) {
             return format!("{month_day} {time_part}");
         }
@@ -1266,7 +1464,6 @@ fn format_time(iso: &str) -> String {
 }
 
 fn parse_month_day(date: &str) -> Option<String> {
-    // "2026-02-17" -> "Feb 17"
     let parts: Vec<&str> = date.split('-').collect();
     if parts.len() != 3 {
         return None;

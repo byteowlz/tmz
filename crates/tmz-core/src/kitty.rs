@@ -22,7 +22,9 @@ pub fn is_supported() -> bool {
         || term_program.contains("kitty")
         || term_program.contains("WezTerm")
         || term_program.contains("ghostty")
+        || term_program.contains("Ghostty")
         || std::env::var("KITTY_WINDOW_ID").is_ok()
+        || std::env::var("GHOSTTY_RESOURCES_DIR").is_ok()
 }
 
 /// Display an image inline in the terminal using the Kitty graphics protocol.
