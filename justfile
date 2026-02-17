@@ -6,20 +6,32 @@ default:
 
 # === Development ===
 
-# Install all binaries
-install:
-    cargo install --path .
+# Data directory for installed resources
+data_dir := env("XDG_DATA_HOME", env("HOME", "~") / ".local/share") / "tmz"
 
-# Install all binaries from workspace
+# Install all binaries + auth script
+install: install-all
+
+# Install all binaries from workspace and supporting files
 install-all:
     @for crate in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.targets[] | .kind[] == "bin") | .manifest_path | split("/") | .[-2]'); do \
         echo "Installing $crate..."; \
         cargo install --path crates/$crate; \
     done
+    @just install-scripts
 
 # Install a specific crate
 install-crate CRATE:
     cargo install --path crates/{{CRATE}}
+
+# Install auth script and Node dependencies to data dir
+install-scripts:
+    @echo "Installing auth scripts to {{data_dir}}..."
+    @mkdir -p "{{data_dir}}"
+    @cp scripts/teams-auth.mjs "{{data_dir}}/teams-auth.mjs"
+    @cp scripts/package.json "{{data_dir}}/package.json"
+    @cd "{{data_dir}}" && npm install --silent 2>/dev/null && npx playwright install chromium 2>/dev/null
+    @echo "Auth script installed to {{data_dir}}/teams-auth.mjs"
 
 # Uninstall all binaries
 uninstall:

@@ -371,9 +371,12 @@ fn parse_token_claims(token: &str) -> Result<(String, String, String, i64), Auth
 ///
 /// Search order:
 /// 1. `$TMZ_AUTH_SCRIPT` environment variable
-/// 2. Next to the current executable (`../scripts/teams-auth.mjs`)
-/// 3. Relative to the workspace root (for development)
+/// 2. `$XDG_DATA_HOME/tmz/teams-auth.mjs` (installed by `just install-all`)
+/// 3. Next to the binary in workspace `scripts/` directory (development)
 fn find_auth_script() -> Result<std::path::PathBuf, AuthenticationError> {
+    const SCRIPT_NAME: &str = "teams-auth.mjs";
+
+    // 1. Explicit env override
     if let Ok(p) = std::env::var("TMZ_AUTH_SCRIPT") {
         let path = std::path::PathBuf::from(p);
         if path.exists() {
@@ -381,29 +384,28 @@ fn find_auth_script() -> Result<std::path::PathBuf, AuthenticationError> {
         }
     }
 
+    // 2. Installed location: $XDG_DATA_HOME/tmz/teams-auth.mjs
+    if let Ok(data_dir) = crate::default_data_dir() {
+        let candidate = data_dir.join(SCRIPT_NAME);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    // 3. Development: walk up from binary to find scripts/ directory
     if let Ok(exe) = std::env::current_exe()
         && let Some(bin_dir) = exe.parent()
     {
         for ancestor in bin_dir.ancestors().take(6) {
-            let candidate = ancestor.join("scripts").join("teams-auth.mjs");
+            let candidate = ancestor.join("scripts").join(SCRIPT_NAME);
             if candidate.exists() {
                 return Ok(candidate);
             }
         }
-
-        let share_candidate = bin_dir
-            .parent()
-            .map(|prefix| prefix.join("share").join("tmz").join("teams-auth.mjs"));
-        if let Some(ref p) = share_candidate
-            && p.exists()
-        {
-            return Ok(p.clone());
-        }
     }
 
     Err(AuthenticationError::TokenExtractionError(
-        "teams-auth.mjs not found. Set TMZ_AUTH_SCRIPT or run from the project directory.\n\
-         Install with: cd scripts && npm install && npx playwright install chromium"
+        "teams-auth.mjs not found. Run 'just install-all' or set TMZ_AUTH_SCRIPT."
             .to_string(),
     ))
 }
