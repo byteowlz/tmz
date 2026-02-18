@@ -645,11 +645,10 @@ fn build_file_message(
     is_image: bool,
 ) -> (String, String) {
     if is_image {
-        let view_link = format!("https://api.asm.skype.com/s/i?{obj_id}");
         let content = format!(
-            r#"<URIObject type="Picture.1" uri="{obj_url}" url_thumbnail="{obj_url}/views/imgt1"><a href="{view_link}">{view_link}</a><meta type="photo" originalName="{file_name}"/></URIObject>"#,
+            r#"<div><img src="{obj_url}/views/imgo" itemscope="" itemtype="http://schema.skype.com/AMSImage" style="width:400px; height:400px"></div>"#,
         );
-        ("RichText/UriObject".to_string(), content)
+        ("RichText/Html".to_string(), content)
     } else {
         let view_link = format!(
             "https://login.skype.com/login/sso?go=webclient.xmm&docid={obj_id}"
