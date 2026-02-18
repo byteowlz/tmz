@@ -1,3 +1,5 @@
+![banner](banner.png)
+
 # tmz
 
 A command-line interface for Microsoft Teams.
@@ -219,15 +221,15 @@ Conversations and messages are cached in SQLite (via sqlx) at `$XDG_DATA_HOME/tm
 
 ### Storage Paths
 
-| Purpose | Path |
-|---|---|
-| Config | `$XDG_CONFIG_HOME/tmz/config.toml` |
-| Cache DB | `$XDG_DATA_HOME/tmz/cache.db` |
-| Tokens | `$XDG_STATE_HOME/tmz/tokens.json` |
+| Purpose         | Path                                   |
+| --------------- | -------------------------------------- |
+| Config          | `$XDG_CONFIG_HOME/tmz/config.toml`     |
+| Cache DB        | `$XDG_DATA_HOME/tmz/cache.db`          |
+| Tokens          | `$XDG_STATE_HOME/tmz/tokens.json`      |
 | Browser profile | `$XDG_STATE_HOME/tmz/browser-profile/` |
-| Auth script | `$XDG_DATA_HOME/tmz/teams-auth.mjs` |
-| Daemon PID | `$XDG_STATE_HOME/tmz/tmz.pid` |
-| Daemon log | `$XDG_STATE_HOME/tmz/tmz.log` |
+| Auth script     | `$XDG_DATA_HOME/tmz/teams-auth.mjs`    |
+| Daemon PID      | `$XDG_STATE_HOME/tmz/tmz.pid`          |
+| Daemon log      | `$XDG_STATE_HOME/tmz/tmz.log`          |
 
 ## Architecture
 
@@ -241,16 +243,16 @@ tmz-api     HTTP API server (axum) [planned]
 
 ## Global Flags
 
-| Flag | Description |
-|---|---|
-| `--json` | Machine-readable JSON output |
-| `--config <path>` | Override config file |
-| `-q` / `--quiet` | Suppress non-error output |
-| `-v` / `-vv` | Increase verbosity |
-| `--debug` / `--trace` | Debug or trace logging |
-| `--no-color` | Disable ANSI colors |
-| `--dry-run` | Preview without side effects |
-| `-y` / `--yes` | Skip interactive prompts |
+| Flag                  | Description                  |
+| --------------------- | ---------------------------- |
+| `--json`              | Machine-readable JSON output |
+| `--config <path>`     | Override config file         |
+| `-q` / `--quiet`      | Suppress non-error output    |
+| `-v` / `-vv`          | Increase verbosity           |
+| `--debug` / `--trace` | Debug or trace logging       |
+| `--no-color`          | Disable ANSI colors          |
+| `--dry-run`           | Preview without side effects |
+| `-y` / `--yes`        | Skip interactive prompts     |
 
 ## Development
 
