@@ -26,6 +26,17 @@ fn try_main() -> Result<()> {
     ctx.init_logging()?;
     debug!("resolved paths: {:#?}", ctx.paths);
 
+    // Show reauth warning if the daemon's headless refresh failed.
+    // Skip for auth commands (user is probably about to fix it).
+    if !matches!(cli.command, Command::Auth { .. })
+        && let Some(reason) = tmz_core::daemon::check_reauth_needed()
+    {
+        eprintln!(
+            "\x1b[33mwarning:\x1b[0m session expired. Run \x1b[1mtmz auth login\x1b[0m to re-authenticate."
+        );
+        debug!("reauth reason: {reason}");
+    }
+
     let rt = tokio::runtime::Runtime::new()?;
 
     match cli.command {
@@ -519,6 +530,8 @@ async fn handle_auth(_ctx: &RuntimeContext, cmd: AuthSubcommand) -> Result<()> {
             }
 
             let tokens = auth.browser_login(Some(timeout), false, fresh).await?;
+            // Clear any reauth notice from the daemon
+            let _ = tmz_core::daemon::clear_reauth_needed();
             println!("Authenticated as: {}", tokens.user_principal_name);
             println!("Tenant: {}", tokens.tenant_id);
             Ok(())
@@ -539,6 +552,7 @@ async fn handle_auth(_ctx: &RuntimeContext, cmd: AuthSubcommand) -> Result<()> {
             let graph = graph_token.ok_or_else(|| anyhow!("--graph-token is required"))?;
             let presence = presence_token.ok_or_else(|| anyhow!("--presence-token is required"))?;
             let tokens = auth.store_tokens(&skype, &chat, &graph, &presence)?;
+            let _ = tmz_core::daemon::clear_reauth_needed();
             println!("Stored tokens for: {}", tokens.user_principal_name);
             Ok(())
         }

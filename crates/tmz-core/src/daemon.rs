@@ -28,6 +28,57 @@ const SYNC_TOP_CHATS: i64 = 30;
 /// Number of messages per conversation to sync.
 const SYNC_MESSAGES_PER_CHAT: i32 = 50;
 
+// ─── Reauth notice ───────────────────────────────────────────────────
+//
+// When the daemon's headless token refresh fails (SSO session expired),
+// it writes a small marker file. Every CLI command checks for this file
+// and prints a warning so the user knows to re-authenticate.
+
+/// Get the reauth notice file path.
+fn reauth_file_path() -> Result<PathBuf, CoreError> {
+    let state_dir = crate::default_state_dir()
+        .map_err(|e| CoreError::Path(format!("resolving state dir: {e}")))?;
+    Ok(state_dir.join("reauth_needed"))
+}
+
+/// Write the reauth notice with a reason.
+///
+/// # Errors
+///
+/// Returns an error on I/O failure.
+pub fn set_reauth_needed(reason: &str) -> Result<(), CoreError> {
+    let path = reauth_file_path()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(CoreError::Io)?;
+    }
+    std::fs::write(&path, reason).map_err(CoreError::Io)
+}
+
+/// Clear the reauth notice (called after successful login).
+///
+/// # Errors
+///
+/// Returns an error on I/O failure.
+pub fn clear_reauth_needed() -> Result<(), CoreError> {
+    let path = reauth_file_path()?;
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(CoreError::Io)?;
+    }
+    Ok(())
+}
+
+/// Check if re-authentication is needed and return the reason.
+/// Returns `None` if everything is fine.
+#[must_use]
+pub fn check_reauth_needed() -> Option<String> {
+    let path = reauth_file_path().ok()?;
+    if path.exists() {
+        std::fs::read_to_string(&path).ok()
+    } else {
+        None
+    }
+}
+
 // ─── PID management ──────────────────────────────────────────────────
 
 /// Get the PID file path.
@@ -231,10 +282,16 @@ async fn do_token_refresh() -> bool {
         Ok(tokens) => {
             let remaining = tokens.expires_at - chrono::Utc::now().timestamp();
             log::info!("tokens refreshed (expires in {remaining}s)");
+            if let Err(e) = clear_reauth_needed() {
+                log::warn!("failed to clear reauth notice: {e}");
+            }
             true
         }
         Err(e) => {
             log::error!("token refresh failed: {e}");
+            if let Err(e2) = set_reauth_needed(&format!("Headless token refresh failed: {e}")) {
+                log::warn!("failed to write reauth notice: {e2}");
+            }
             false
         }
     }
