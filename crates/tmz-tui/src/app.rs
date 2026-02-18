@@ -122,23 +122,38 @@ impl App {
         self.conversations.get(idx)
     }
 
-    /// Filter conversations by the current search string.
+    /// Filter conversations by the current tab and search string.
     pub fn filter_conversations(&mut self) {
-        if self.chat_search.is_empty() {
-            self.filtered_conversations = (0..self.conversations.len()).collect();
-        } else {
-            let query = self.chat_search.to_lowercase();
-            self.filtered_conversations = self
-                .conversations
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| {
+        let query = self.chat_search.to_lowercase();
+        self.filtered_conversations = self
+            .conversations
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| {
+                // Filter by tab
+                let type_match = match self.side_tab {
+                    SideTab::Chats => matches!(
+                        c.thread_type.as_str(),
+                        "chat" | "meeting" | "sfbinteropchat"
+                    ),
+                    SideTab::Teams => c.thread_type == "space",
+                    SideTab::Channels => c.thread_type == "topic",
+                };
+                if !type_match {
+                    return false;
+                }
+
+                // Filter by search
+                if query.is_empty() {
+                    true
+                } else {
                     c.display_name.to_lowercase().contains(&query)
                         || c.member_names.to_lowercase().contains(&query)
-                })
-                .map(|(i, _)| i)
-                .collect();
-        }
+                }
+            })
+            .map(|(i, _)| i)
+            .collect();
+
         // Clamp selection
         if self.chat_selected >= self.filtered_conversations.len() {
             self.chat_selected = self.filtered_conversations.len().saturating_sub(1);
@@ -366,9 +381,9 @@ fn handle_normal_key(
         }
 
         // Side tabs
-        KeyCode::Char('1') => app.side_tab = SideTab::Chats,
-        KeyCode::Char('2') => app.side_tab = SideTab::Teams,
-        KeyCode::Char('3') => app.side_tab = SideTab::Channels,
+        KeyCode::Char('1') => switch_tab(app, SideTab::Chats, rt),
+        KeyCode::Char('2') => switch_tab(app, SideTab::Teams, rt),
+        KeyCode::Char('3') => switch_tab(app, SideTab::Channels, rt),
 
         // Toggle files panel
         KeyCode::Char('f') => app.show_files = !app.show_files,
@@ -494,6 +509,17 @@ fn handle_tick(app: &mut App, rt: &tokio::runtime::Runtime) {
         let remaining = tokens.expires_at - chrono::Utc::now().timestamp();
         app.token_expires_mins = Some(remaining / 60);
     }
+}
+
+fn switch_tab(app: &mut App, tab: SideTab, rt: &tokio::runtime::Runtime) {
+    if app.side_tab == tab {
+        return;
+    }
+    app.side_tab = tab;
+    app.chat_selected = 0;
+    app.chat_search.clear();
+    app.filter_conversations();
+    load_selected_chat(app, rt);
 }
 
 fn load_selected_chat(app: &mut App, rt: &tokio::runtime::Runtime) {

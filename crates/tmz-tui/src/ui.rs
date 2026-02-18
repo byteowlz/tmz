@@ -129,6 +129,7 @@ fn draw_chat_list(f: &mut Frame<'_>, app: &App, area: Rect) {
     );
 
     // Conversation list
+    let max_name_len = (area.width as usize).saturating_sub(6); // border + padding + bar + space
     let items: Vec<ListItem<'_>> = app
         .filtered_conversations
         .iter()
@@ -136,22 +137,32 @@ fn draw_chat_list(f: &mut Frame<'_>, app: &App, area: Rect) {
         .map(|(i, &conv_idx)| {
             let conv = &app.conversations[conv_idx];
             let name = if conv.display_name.is_empty() {
-                &conv.id
+                conv.member_names.as_str()
             } else {
-                &conv.display_name
+                conv.display_name.as_str()
             };
-            let truncated: String = name.chars().take(24).collect();
+            let truncated: String = name.chars().take(max_name_len).collect();
 
             let preview: String = conv
                 .last_message_preview
                 .chars()
-                .take(22)
+                .take(max_name_len.saturating_sub(1))
                 .collect::<String>()
                 .replace('\n', " ");
 
             let is_selected = i == app.chat_selected;
-            let style = if is_selected {
-                Style::default().bg(BG_SELECTED).fg(Color::White).bold()
+            let bar_color = thread_type_color(&conv.thread_type);
+
+            let bar_style = if is_selected {
+                Style::default().fg(bar_color).bg(BG_SELECTED)
+            } else {
+                Style::default().fg(bar_color)
+            };
+            let name_style = if is_selected {
+                Style::default()
+                    .bg(BG_SELECTED)
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::Gray)
             };
@@ -162,8 +173,14 @@ fn draw_chat_list(f: &mut Frame<'_>, app: &App, area: Rect) {
             };
 
             ListItem::new(vec![
-                Line::from(Span::styled(truncated, style)),
-                Line::from(Span::styled(format!(" {preview}"), preview_style)),
+                Line::from(vec![
+                    Span::styled("│ ", bar_style),
+                    Span::styled(truncated, name_style),
+                ]),
+                Line::from(vec![
+                    Span::styled("│ ", bar_style),
+                    Span::styled(preview, preview_style),
+                ]),
             ])
         })
         .collect();
@@ -524,6 +541,17 @@ fn key<'a>(keys: &'a str, desc: &'a str) -> Line<'a> {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────
+
+/// Color for the left bar based on conversation thread type.
+const fn thread_type_color(thread_type: &str) -> Color {
+    match thread_type.as_bytes() {
+        b"chat" | b"sfbinteropchat" => Color::Cyan,
+        b"meeting" => Color::Yellow,
+        b"space" => Color::Green,
+        b"topic" => Color::Magenta,
+        _ => DIM,
+    }
+}
 
 fn extract_time(compose_time: &str) -> String {
     // "2026-02-18T09:38:22.933Z" -> "09:38"
