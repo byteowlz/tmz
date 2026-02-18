@@ -6,13 +6,37 @@ Human-readable output by default. `--json` for machines. All reads from local SQ
 
 ## Install
 
+### Homebrew (macOS/Linux)
+
+```bash
+brew install byteowlz/tap/tmz
+```
+
+### AUR (Arch Linux)
+
+```bash
+yay -S tmz
+```
+
+### Scoop (Windows)
+
+```bash
+scoop bucket add byteowlz https://github.com/byteowlz/scoop-bucket
+scoop install tmz
+```
+
+### From Source
+
 ```bash
 just install-all
 ```
 
-This installs the `tmz` binary, the Playwright auth script, and Chromium.
+### Prerequisites
 
-Prerequisites: Rust toolchain, Node.js.
+- **Node.js** -- required for the Playwright-based browser auth script
+- **Playwright + Chromium** -- install with `just setup-auth` or `npx playwright install chromium`
+
+After installing, run `tmz init` to set up config directories and generate a default `config.toml`.
 
 ## Quick Start
 

@@ -452,7 +452,13 @@ fn find_auth_script() -> Result<std::path::PathBuf, AuthenticationError> {
         }
     }
 
-    // 3. Development: walk up from binary to find scripts/ directory
+    // 3. System install (e.g. AUR: /usr/share/tmz/)
+    let system_path = std::path::Path::new("/usr/share/tmz").join(SCRIPT_NAME);
+    if system_path.exists() {
+        return Ok(system_path);
+    }
+
+    // 4. Development: walk up from binary to find scripts/ directory
     if let Ok(exe) = std::env::current_exe()
         && let Some(bin_dir) = exe.parent()
     {

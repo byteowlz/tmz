@@ -159,3 +159,5 @@ criterion/
 # IDE/Editor specific (Rust)
 .cargo/
 !.cargo/config.toml
+logo/~ai-*
+logo/*.tmp
