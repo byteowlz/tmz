@@ -292,7 +292,10 @@ enum AuthSubcommand {
 
 #[derive(Debug, Clone, Copy, Args)]
 struct SyncCommand {
-    /// Also sync recent messages for the top N conversations.
+    /// Sync messages for ALL conversations (not just top N).
+    #[arg(long)]
+    full: bool,
+    /// Sync recent messages for the top N conversations.
     #[arg(short, long, default_value_t = 30)]
     messages: usize,
     /// Number of messages per conversation to fetch.
@@ -578,9 +581,13 @@ async fn handle_sync(ctx: &RuntimeContext, cmd: SyncCommand) -> Result<()> {
     }
     eprintln!("{conv_count} conversations.");
 
-    // 2. Sync messages for top N conversations (by last activity)
-    if cmd.messages > 0 {
-        let top_convs = db.list_conversations(cmd.messages as i64).await?;
+    // 2. Sync messages for conversations (all if --full, top N otherwise)
+    if cmd.full || cmd.messages > 0 {
+        let top_convs = if cmd.full {
+            db.list_conversations(conv_count as i64).await?
+        } else {
+            db.list_conversations(cmd.messages as i64).await?
+        };
         let total = top_convs.len();
         let mut msg_count = 0u64;
 
