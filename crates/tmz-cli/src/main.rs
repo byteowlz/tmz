@@ -63,6 +63,7 @@ fn try_main() -> Result<()> {
         Command::Teams { subcommand } => rt.block_on(handle_teams(&ctx, subcommand)),
         Command::Service { command } => rt.block_on(handle_service(&ctx, command)),
         Command::Init(cmd) => handle_init(&ctx, cmd),
+        Command::Cache { command } => rt.block_on(handle_cache(&ctx, command)),
         Command::Config { command } => handle_config(&ctx, command),
         Command::Completions { shell } => {
             handle_completions(shell);
@@ -253,6 +254,11 @@ enum Command {
         #[command(subcommand)]
         command: ServiceCommand,
     },
+    /// Manage the local cache.
+    Cache {
+        #[command(subcommand)]
+        command: CacheCommand,
+    },
     /// Inspect and manage configuration.
     Config {
         #[command(subcommand)]
@@ -336,6 +342,18 @@ struct InitCommand {
     /// Recreate configuration even if it already exists.
     #[arg(long = "force")]
     force: bool,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum CacheCommand {
+    /// Show cache statistics.
+    Stats,
+    /// Prune cached images older than N days.
+    Prune {
+        /// Delete images older than this many days.
+        #[arg(short, long, default_value_t = 30)]
+        days: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Subcommand)]
@@ -600,6 +618,7 @@ async fn handle_sync(ctx: &RuntimeContext, cmd: SyncCommand) -> Result<()> {
         };
         let total = top_convs.len();
         let mut msg_count = 0u64;
+        let mut image_urls: Vec<String> = Vec::new();
 
         for (i, conv) in top_convs.iter().enumerate() {
             let name = if conv.display_name.is_empty() {
@@ -618,6 +637,14 @@ async fn handle_sync(ctx: &RuntimeContext, cmd: SyncCommand) -> Result<()> {
                     if let Some(messages) = msg_data["messages"].as_array() {
                         for msg in messages {
                             if let Some(cached) = cache::parse_message(msg, &conv.id) {
+                                // Extract image URLs for caching
+                                let urls =
+                                    tmz_core::kitty::extract_image_urls(&cached.content_html);
+                                for url in &urls {
+                                    if !db.has_image(url).await.unwrap_or(true) {
+                                        image_urls.push(url.clone());
+                                    }
+                                }
                                 db.upsert_message(&cached).await?;
                                 msg_count += 1;
                             }
@@ -630,12 +657,40 @@ async fn handle_sync(ctx: &RuntimeContext, cmd: SyncCommand) -> Result<()> {
             }
         }
         eprintln!("\r{msg_count} messages across {total} conversations.{:>40}", "");
+
+        // Download uncached images
+        if !image_urls.is_empty() {
+            let img_total = image_urls.len();
+            let mut img_ok = 0u64;
+            for (i, url) in image_urls.iter().enumerate() {
+                eprint!("\rCaching images [{}/{}]...", i + 1, img_total);
+                match client.download_image(url).await {
+                    Ok(data) => {
+                        let content_type = if url.contains("imgpsh") {
+                            "image/jpeg"
+                        } else {
+                            "image/png"
+                        };
+                        if db.cache_image(url, &data, content_type).await.is_ok() {
+                            img_ok += 1;
+                        }
+                    }
+                    Err(e) => log::debug!("image download failed: {e}"),
+                }
+            }
+            if img_ok > 0 {
+                eprintln!("\r{img_ok} images cached.{:>40}", "");
+            }
+        }
     }
 
     let stats = db.stats().await?;
     println!(
-        "Cache: {} conversations, {} messages.",
-        stats.conversations, stats.messages
+        "Cache: {} conversations, {} messages, {} images ({}).",
+        stats.conversations,
+        stats.messages,
+        stats.images,
+        format_bytes(stats.image_bytes),
     );
 
     Ok(())
@@ -745,11 +800,6 @@ async fn handle_msg(
     }
 
     let show_images = !no_images && tmz_core::kitty::is_supported();
-    let client = if show_images {
-        TeamsClient::new().ok()
-    } else {
-        None
-    };
 
     // Group consecutive messages from the same sender into bubbles
     let groups = group_messages(&messages);
@@ -758,20 +808,33 @@ async fn handle_msg(
     for group in &groups {
         print_bubble(group, prev_group);
 
-        // Render inline images via Kitty protocol after the bubble
-        if show_images
-            && let Some(ref client) = client
-        {
+        // Render inline images via Kitty protocol
+        if show_images {
             for msg in &group.messages {
                 let urls = tmz_core::kitty::extract_image_urls(&msg.content_html);
                 for url in &urls {
-                    match client.download_image(url).await {
-                        Ok(data) => {
-                            if let Err(e) = tmz_core::kitty::display_image(&data) {
-                                debug!("kitty image render failed: {e}");
+                    // Try cache first, fall back to network
+                    let image_data = if let Ok(Some(data)) = db.get_image(url).await {
+                        Some(data)
+                    } else if let Ok(client) = TeamsClient::new() {
+                        match client.download_image(url).await {
+                            Ok(data) => {
+                                let _ = db.cache_image(url, &data, "image/png").await;
+                                Some(data)
+                            }
+                            Err(e) => {
+                                debug!("image download failed: {e}");
+                                None
                             }
                         }
-                        Err(e) => debug!("image download failed: {e}"),
+                    } else {
+                        None
+                    };
+
+                    if let Some(data) = image_data
+                        && let Err(e) = tmz_core::kitty::display_image(&data)
+                    {
+                        debug!("kitty image render failed: {e}");
                     }
                 }
             }
@@ -1300,6 +1363,33 @@ fn handle_init(ctx: &RuntimeContext, cmd: InitCommand) -> Result<()> {
     write_default_config(&ctx.paths.config_file)
 }
 
+async fn handle_cache(ctx: &RuntimeContext, command: CacheCommand) -> Result<()> {
+    let db = ctx.open_cache().await?;
+    match command {
+        CacheCommand::Stats => {
+            let stats = db.stats().await?;
+            if ctx.common.json {
+                println!("{}", serde_json::to_string_pretty(&stats)?);
+            } else {
+                println!("Conversations: {}", stats.conversations);
+                println!("Messages:      {}", stats.messages);
+                println!("Images:        {} ({})", stats.images, format_bytes(stats.image_bytes));
+            }
+        }
+        CacheCommand::Prune { days } => {
+            let pruned = db.prune_images(days).await?;
+            println!("Pruned {pruned} images older than {days} days.");
+            let stats = db.stats().await?;
+            println!(
+                "Remaining: {} images ({})",
+                stats.images,
+                format_bytes(stats.image_bytes)
+            );
+        }
+    }
+    Ok(())
+}
+
 fn handle_config(ctx: &RuntimeContext, command: ConfigCommand) -> Result<()> {
     match command {
         ConfigCommand::Show => {
@@ -1591,6 +1681,21 @@ fn highlight_matches(text: &str, query_words: &[&str]) -> String {
 ///
 /// `https://www.linkedin.com/posts/very-long-path?utm_source=...` becomes
 /// `linkedin.com/.../very-long-path...`
+fn format_bytes(bytes: i64) -> String {
+    const KB: i64 = 1024;
+    const MB: i64 = 1024 * 1024;
+    const GB: i64 = 1024 * 1024 * 1024;
+    if bytes >= GB {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
 fn shorten_urls(text: &str, max_url_len: usize) -> String {
     use std::fmt::Write;
 

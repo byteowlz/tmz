@@ -607,12 +607,15 @@ impl TeamsClient {
     /// Returns an error if not authenticated, the request fails, or the URL
     /// is not reachable.
     pub async fn download_image(&self, url: &str) -> Result<Vec<u8>, CoreError> {
-        let tokens = self.valid_tokens().await?;
+        let session = self.get_session().await?;
 
         let response = self
             .http_client
             .get(url)
-            .header("Authorization", format!("skypetoken={}", tokens.skype_token))
+            .header(
+                "Authorization",
+                format!("skype_token {}", session.skype_token),
+            )
             .send()
             .await
             .map_err(|e| CoreError::Api(format!("image download failed: {e}")))?;

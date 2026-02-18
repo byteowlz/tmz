@@ -102,6 +102,7 @@ impl Cache {
         Ok(cache)
     }
 
+    #[expect(clippy::too_many_lines, reason = "sequential DDL statements")]
     async fn run_migrations(&self) -> Result<(), CoreError> {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS conversations (
@@ -201,6 +202,19 @@ impl Cache {
         .execute(&self.pool)
         .await
         .map_err(|e| CoreError::Other(format!("creating conversation name index: {e}")))?;
+
+        // Image cache: store downloaded images as blobs
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS images (
+                url TEXT PRIMARY KEY,
+                data BLOB NOT NULL,
+                content_type TEXT NOT NULL DEFAULT 'image/png',
+                cached_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )"
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|e| CoreError::Other(format!("creating images table: {e}")))?;
 
         Ok(())
     }
@@ -443,6 +457,90 @@ impl Cache {
     /// # Errors
     ///
     /// Returns an error if the database read fails.
+    /// Store an image in the cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database write fails.
+    pub async fn cache_image(
+        &self,
+        url: &str,
+        data: &[u8],
+        content_type: &str,
+    ) -> Result<(), CoreError> {
+        sqlx::query(
+            "INSERT INTO images (url, data, content_type, cached_at)
+             VALUES (?, ?, ?, datetime('now'))
+             ON CONFLICT(url) DO UPDATE SET
+                data = excluded.data,
+                content_type = excluded.content_type,
+                cached_at = excluded.cached_at",
+        )
+        .bind(url)
+        .bind(data)
+        .bind(content_type)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| CoreError::Other(format!("caching image: {e}")))?;
+
+        Ok(())
+    }
+
+    /// Retrieve a cached image by URL. Returns `None` if not cached.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database read fails.
+    pub async fn get_image(&self, url: &str) -> Result<Option<Vec<u8>>, CoreError> {
+        let row: Option<(Vec<u8>,)> =
+            sqlx::query_as("SELECT data FROM images WHERE url = ?")
+                .bind(url)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| CoreError::Other(format!("getting cached image: {e}")))?;
+
+        Ok(row.map(|(data,)| data))
+    }
+
+    /// Check if an image URL is already cached.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database read fails.
+    pub async fn has_image(&self, url: &str) -> Result<bool, CoreError> {
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM images WHERE url = ?")
+                .bind(url)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| CoreError::Other(format!("checking image cache: {e}")))?;
+
+        Ok(count > 0)
+    }
+
+    /// Delete cached images older than the given number of days.
+    /// Returns the number of images pruned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database write fails.
+    pub async fn prune_images(&self, older_than_days: u32) -> Result<u64, CoreError> {
+        let result = sqlx::query(
+            "DELETE FROM images WHERE cached_at < datetime('now', ?)",
+        )
+        .bind(format!("-{older_than_days} days"))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| CoreError::Other(format!("pruning images: {e}")))?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// Get cache statistics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database read fails.
     pub async fn stats(&self) -> Result<CacheStats, CoreError> {
         let conv_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM conversations")
             .fetch_one(&self.pool)
@@ -454,9 +552,21 @@ impl Cache {
             .await
             .map_err(|e| CoreError::Other(format!("counting messages: {e}")))?;
 
+        let img_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM images")
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0);
+
+        let img_bytes: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(LENGTH(data)), 0) FROM images")
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0);
+
         Ok(CacheStats {
             conversations: conv_count,
             messages: msg_count,
+            images: img_count,
+            image_bytes: img_bytes,
         })
     }
 }
@@ -468,6 +578,10 @@ pub struct CacheStats {
     pub conversations: i64,
     /// Number of cached messages.
     pub messages: i64,
+    /// Number of cached images.
+    pub images: i64,
+    /// Total size of cached images in bytes.
+    pub image_bytes: i64,
 }
 
 fn row_to_conversation(row: &sqlx::sqlite::SqliteRow) -> CachedConversation {
