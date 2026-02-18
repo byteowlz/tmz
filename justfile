@@ -181,10 +181,40 @@ release: build-release
     @echo "Binary sizes:"
     @find target/release -maxdepth 1 -type f -perm +111 ! -name "*.d" -exec ls -lh {} \; 2>/dev/null || true
 
+# Bump version: just bump patch|minor|major
+bump LEVEL:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    current=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+    IFS='.' read -r major minor patch <<< "$current"
+    case "{{LEVEL}}" in
+        patch) patch=$((patch + 1)) ;;
+        minor) minor=$((minor + 1)); patch=0 ;;
+        major) major=$((major + 1)); minor=0; patch=0 ;;
+        *) echo "Usage: just bump patch|minor|major"; exit 1 ;;
+    esac
+    new="${major}.${minor}.${patch}"
+    sed -i '' "s/^version = \"${current}\"/version = \"${new}\"/" Cargo.toml
+    cargo check --workspace 2>/dev/null
+    git add -A
+    git commit -m "chore: bump to ${new}"
+    echo "Bumped ${current} -> ${new}"
+
 # Tag and push a release
 release-tag VERSION:
     git tag v{{VERSION}}
     git push --tags
+
+# Bump, tag, and push in one step: just release-bump patch|minor|major
+release-bump LEVEL:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just bump {{LEVEL}}
+    version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+    git tag "v${version}"
+    git push origin main
+    git push origin "v${version}"
+    echo "Released v${version}"
 
 # Set up GitHub secrets for automated releases (requires byt)
 setup-secrets:
