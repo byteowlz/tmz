@@ -278,6 +278,7 @@ impl TeamsClient {
         file_path: &std::path::Path,
     ) -> Result<serde_json::Value, CoreError> {
         let session = self.get_session().await?;
+        let tokens = self.valid_tokens().await?;
 
         let file_name = file_path
             .file_name()
@@ -295,20 +296,118 @@ impl TeamsClient {
             .to_lowercase();
         let is_image = matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp");
 
-        // 1. Create ASM object + upload content
-        let obj_id = self
-            .upload_to_asm(&session, conversation_id, &file_name, &file_bytes, &ext, is_image)
-            .await?;
+        if is_image {
+            // Images: upload to ASM blob store and send as inline image
+            let obj_id = self
+                .upload_to_asm(&session, conversation_id, &file_name, &file_bytes, &ext, is_image)
+                .await?;
 
-        let obj_url = format!("https://api.asm.skype.com/v1/objects/{obj_id}");
+            let obj_url = format!("https://api.asm.skype.com/v1/objects/{obj_id}");
+            let (msg_type, msg_content) =
+                build_file_message(&obj_id, &obj_url, &file_name, file_size, true);
 
-        // 2. Build and send the file message
-        let (msg_type, msg_content) = build_file_message(
-            &obj_id, &obj_url, &file_name, file_size, is_image,
+            self.send_raw_message(conversation_id, &session, &msg_type, &msg_content)
+                .await
+        } else {
+            // Non-image files: upload to OneDrive via Graph API, share link in chat.
+            // This matches how the Teams web client shares files.
+            let upload_result = self
+                .upload_to_onedrive(&tokens.graph_token, &file_name, &file_bytes)
+                .await?;
+
+            let web_url = upload_result["webUrl"]
+                .as_str()
+                .ok_or_else(|| CoreError::Api("missing webUrl in upload response".to_string()))?;
+
+            let size_kb = file_size / 1024;
+            let size_str = if size_kb > 0 {
+                format!("{size_kb} KB")
+            } else {
+                format!("{file_size} B")
+            };
+
+            let content = format!(
+                r#"<p><a href="{web_url}">{file_name}</a> ({size_str})</p>"#,
+            );
+
+            self.send_raw_message(conversation_id, &session, "RichText/Html", &content)
+                .await
+        }
+    }
+
+    /// Upload a file to the user's `OneDrive` (root `/tmz-uploads/` folder).
+    /// Returns the Graph API response with `webUrl` for the uploaded file.
+    async fn upload_to_onedrive(
+        &self,
+        graph_token: &str,
+        file_name: &str,
+        file_bytes: &[u8],
+    ) -> Result<serde_json::Value, CoreError> {
+        // Upload to /tmz-uploads/<filename> in the user's OneDrive
+        let raw_path = format!("tmz-uploads/{file_name}");
+        let encoded_path = urlencoding::encode(&raw_path);
+        let upload_url = format!(
+            "https://graph.microsoft.com/v1.0/me/drive/root:/{encoded_path}:/content"
         );
 
-        self.send_raw_message(conversation_id, &session, &msg_type, &msg_content)
+        let response = self
+            .http_client
+            .put(&upload_url)
+            .bearer_auth(graph_token)
+            .header("Content-Type", "application/octet-stream")
+            .body(file_bytes.to_vec())
+            .send()
             .await
+            .map_err(|e| CoreError::Api(format!("OneDrive upload failed: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(CoreError::Api(format!(
+                "OneDrive upload failed: {status} - {text}"
+            )));
+        }
+
+        // Create a sharing link so the recipient can access the file
+        let item: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| CoreError::Serialization(format!("parsing upload response: {e}")))?;
+
+        let item_id = item["id"]
+            .as_str()
+            .ok_or_else(|| CoreError::Api("missing item id".to_string()))?;
+
+        // Create an organization-wide sharing link
+        let share_url = format!(
+            "https://graph.microsoft.com/v1.0/me/drive/items/{item_id}/createLink"
+        );
+        let share_body = serde_json::json!({
+            "type": "view",
+            "scope": "organization"
+        });
+
+        let share_resp = self
+            .http_client
+            .post(&share_url)
+            .bearer_auth(graph_token)
+            .json(&share_body)
+            .send()
+            .await
+            .map_err(|e| CoreError::Api(format!("creating share link: {e}")))?;
+
+        if share_resp.status().is_success() {
+            let share_data: serde_json::Value = share_resp.json().await.unwrap_or_default();
+            if let Some(link_url) = share_data["link"]["webUrl"].as_str() {
+                // Return a modified item with the sharing URL
+                let mut result = item;
+                result["webUrl"] = serde_json::Value::String(link_url.to_string());
+                return Ok(result);
+            }
+        }
+
+        // Fallback: use the direct webUrl (may require OneDrive access)
+        Ok(item)
     }
 
     async fn upload_to_asm(
@@ -638,7 +737,7 @@ impl TeamsClient {
 /// Decode a skypeToken JWT to extract skype ID and expiry.
 /// Build the XML message body for a file or image upload.
 fn build_file_message(
-    _obj_id: &str,
+    obj_id: &str,
     obj_url: &str,
     file_name: &str,
     file_size: usize,
@@ -650,17 +749,19 @@ fn build_file_message(
         );
         ("RichText/Html".to_string(), content)
     } else {
-        // Non-image files: send as RichText/Html with a download link.
-        // The URIObject/Media_GenericFile format renders as raw XML in Teams v2.
-        let download_url = format!("{obj_url}/views/original");
+        // Non-image files: embed as a download image link via ASM.
+        // Teams v2 doesn't render URIObject XML, and direct ASM links
+        // require auth. Use the ASM short link which redirects through
+        // Skype SSO for authenticated download.
+        let download_url = format!("https://api.asm.skype.com/s/i?{obj_id}");
         let size_kb = file_size / 1024;
         let size_str = if size_kb > 0 {
-            format!(" ({size_kb} KB)")
+            format!("{size_kb} KB")
         } else {
-            format!(" ({file_size} B)")
+            format!("{file_size} B")
         };
         let content = format!(
-            r#"<p><a href="{download_url}">{file_name}</a>{size_str}</p>"#,
+            r#"<p><b>{file_name}</b> ({size_str}) - <a href="{download_url}">download</a></p>"#,
         );
         ("RichText/Html".to_string(), content)
     }
