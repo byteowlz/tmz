@@ -622,6 +622,22 @@ pub fn strip_html(html: &str) -> String {
     // Pre-process: insert newlines for block-level elements
     let mut s = html.to_string();
 
+    // Extract file info from URIObject tags before stripping
+    if s.contains("<URIObject") {
+        // Extract original file name if present
+        let file_name = extract_xml_attr(&s, "OriginalName", "v")
+            .or_else(|| extract_xml_attr(&s, "meta", "originalName"));
+        let file_size = extract_xml_attr(&s, "FileSize", "v");
+
+        if let Some(name) = file_name {
+            let size_str = file_size.map_or(String::new(), |sz| format!(" ({sz} bytes)"));
+            s = format!("[file: {name}{size_str}]");
+            // Early return - the URIObject is fully replaced
+            return s;
+        }
+        // If we can't parse it, fall through to normal stripping
+    }
+
     // Remove blockquote sections entirely (quoted reply context)
     while let Some(start) = s.find("<blockquote") {
         if let Some(end) = s[start..].find("</blockquote>") {
@@ -698,6 +714,21 @@ pub fn strip_html(html: &str) -> String {
 }
 
 /// Decode numeric HTML entities like `&#128077;` to their Unicode characters.
+/// Extract an attribute value from an XML-style tag.
+/// e.g. `extract_xml_attr(html, "OriginalName", "v")` finds `<OriginalName v="report.pdf"/>`.
+fn extract_xml_attr(html: &str, tag_name: &str, attr_name: &str) -> Option<String> {
+    let tag_start = html.find(&format!("<{tag_name}"))?;
+    let tag_region = &html[tag_start..];
+    let tag_end = tag_region.find('>')?;
+    let tag = &tag_region[..=tag_end];
+
+    let needle = format!("{attr_name}=\"");
+    let attr_start = tag.find(&needle)?;
+    let value_start = attr_start + needle.len();
+    let value_end = tag[value_start..].find('"')?;
+    Some(tag[value_start..value_start + value_end].to_string())
+}
+
 fn decode_numeric_entities(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -783,8 +814,16 @@ pub fn parse_conversation(conv: &serde_json::Value) -> CachedConversation {
 pub fn parse_message(msg: &serde_json::Value, conversation_id: &str) -> Option<CachedMessage> {
     let msg_type = msg["messagetype"].as_str().unwrap_or("");
 
-    // Skip system/control messages
-    if !matches!(msg_type, "RichText/Html" | "Text" | "RichText") {
+    // Skip system/control messages, keep text, rich text, and file/media messages
+    if !matches!(
+        msg_type,
+        "RichText/Html"
+            | "Text"
+            | "RichText"
+            | "RichText/UriObject"
+            | "RichText/Media_GenericFile"
+            | "RichText/Media_Card"
+    ) {
         return None;
     }
 

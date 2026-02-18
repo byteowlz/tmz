@@ -638,7 +638,7 @@ impl TeamsClient {
 /// Decode a skypeToken JWT to extract skype ID and expiry.
 /// Build the XML message body for a file or image upload.
 fn build_file_message(
-    obj_id: &str,
+    _obj_id: &str,
     obj_url: &str,
     file_name: &str,
     file_size: usize,
@@ -650,13 +650,19 @@ fn build_file_message(
         );
         ("RichText/Html".to_string(), content)
     } else {
-        let view_link = format!(
-            "https://login.skype.com/login/sso?go=webclient.xmm&docid={obj_id}"
-        );
+        // Non-image files: send as RichText/Html with a download link.
+        // The URIObject/Media_GenericFile format renders as raw XML in Teams v2.
+        let download_url = format!("{obj_url}/views/original");
+        let size_kb = file_size / 1024;
+        let size_str = if size_kb > 0 {
+            format!(" ({size_kb} KB)")
+        } else {
+            format!(" ({file_size} B)")
+        };
         let content = format!(
-            r#"<URIObject type="File.1" uri="{obj_url}" url_thumbnail="{obj_url}/views/thumbnail"><FileSize v="{file_size}"/><OriginalName v="{file_name}"/><a href="{view_link}">{view_link}</a></URIObject>"#,
+            r#"<p><a href="{download_url}">{file_name}</a>{size_str}</p>"#,
         );
-        ("RichText/Media_GenericFile".to_string(), content)
+        ("RichText/Html".to_string(), content)
     }
 }
 
