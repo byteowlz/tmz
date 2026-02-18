@@ -40,13 +40,15 @@ fn in_tmux() -> bool {
 /// Write a Kitty graphics escape sequence, wrapping in tmux DCS passthrough
 /// if needed.
 ///
-/// Inside tmux, the Kitty `\x1b_G...\x1b\\` must be wrapped as:
+/// tmux 3.4+ with `allow-passthrough on`:
+/// `\x1bP\x1b_G...\x1b\\\x1b\\`
+///
+/// Older tmux DCS passthrough (doubled escapes):
 /// `\x1bPtmux;\x1b\x1b_G...\x1b\x1b\\\x1b\\`
 fn write_kitty_escape(stdout: &mut impl Write, payload: &str) -> io::Result<()> {
     if in_tmux() {
-        // tmux DCS passthrough: \ePtmux;\e<escaped_sequence>\e\\
-        // Inside the passthrough, every \e must be doubled
-        write!(stdout, "\x1bPtmux;\x1b\x1b_G{payload}\x1b\x1b\\\x1b\\")?;
+        // tmux 3.4+ direct DCS passthrough (no "tmux;" prefix, no doubled escapes)
+        write!(stdout, "\x1bP\x1b_G{payload}\x1b\\\x1b\\")?;
     } else {
         write!(stdout, "\x1b_G{payload}\x1b\\")?;
     }
