@@ -1,58 +1,107 @@
 #!/usr/bin/env node
 // Teams browser-based token extraction using Playwright.
 //
-// Launches a Chromium browser, navigates to Teams web client, waits for
-// the user to complete authentication, then captures MSAL access tokens
-// by intercepting OAuth token responses from login.microsoftonline.com.
+// Launches Chromium with a persistent profile, navigates to Teams,
+// and extracts MSAL access tokens from localStorage.
+//
+// If the cached browser profile has stale tokens, the MSAL cache is
+// cleared and the page reloaded to force a fresh SSO authentication.
 //
 // Usage:
-//   node scripts/teams-auth.mjs [--timeout 300] [--headless]
+//   node teams-auth.mjs [--timeout 300] [--headless]
 //
 // Output (JSON to stdout):
-//   { "skype_token": "...", "chat_token": "...", "graph_token": "...",
-//     "presence_token": "...", "expires_in": 3600 }
+//   { "<localStorage-key>": "<localStorage-value>", ... }
 
 import { chromium } from "playwright";
 
 const TEAMS_URL = "https://teams.microsoft.com/v2";
 const DEFAULT_TIMEOUT_SECS = 300;
-const POLL_INTERVAL_MS = 1000;
+const POLL_INTERVAL_MS = 2000;
 
-// Token scopes we need, mapped to our names
-const REQUIRED_TOKENS = {
-  "api.spaces.skype.com": "skype_token",
-  "chatsvcagg.teams.microsoft.com": "chat_token",
-  "graph.microsoft.com": "graph_token",
-  "presence.teams.microsoft.com": "presence_token",
-};
+const REQUIRED_RESOURCES = [
+  "api.spaces.skype.com",
+  "chatsvcagg.teams.microsoft.com",
+  "graph.microsoft.com",
+  "presence.teams.microsoft.com",
+];
 
 function parseArgs() {
   const args = process.argv.slice(2);
   let timeout = DEFAULT_TIMEOUT_SECS;
   let headless = false;
+  let fresh = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--timeout" && args[i + 1]) {
       timeout = parseInt(args[i + 1], 10);
       i++;
     } else if (args[i] === "--headless") {
       headless = true;
+    } else if (args[i] === "--fresh") {
+      fresh = true;
     }
   }
-  return { timeout, headless };
+  return { timeout, headless, fresh };
 }
 
 function log(msg) {
   process.stderr.write(`[tmz-auth] ${msg}\n`);
 }
 
+async function extractAccessTokens(page) {
+  return await page.evaluate(() => {
+    const tokens = {};
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (
+        key &&
+        key.includes("accesstoken") &&
+        key.includes("login.windows.net")
+      ) {
+        tokens[key] = localStorage.getItem(key);
+      }
+    }
+    return tokens;
+  });
+}
+
+function hasAllRequiredTokens(tokens) {
+  const keys = Object.keys(tokens);
+  return REQUIRED_RESOURCES.every((resource) =>
+    keys.some((key) => key.toLowerCase().includes(resource.toLowerCase()))
+  );
+}
+
+/** Clear all MSAL and Teams auth caches from localStorage. */
+async function clearAuthCaches(page) {
+  return await page.evaluate(() => {
+    const keysToRemove = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key) continue;
+      // Remove old MSAL format tokens
+      if (key.includes("accesstoken") || key.includes("idtoken") || key.includes("refreshtoken")) {
+        keysToRemove.push(key);
+      }
+      // Remove new Teams v2 tmp.auth tokens
+      if (key.startsWith("tmp.auth.") && key.includes(".Token.")) {
+        keysToRemove.push(key);
+      }
+      // Remove MSAL token key indices
+      if (key.includes("msal.token.keys")) {
+        keysToRemove.push(key);
+      }
+    }
+    keysToRemove.forEach((k) => localStorage.removeItem(k));
+    return keysToRemove.length;
+  });
+}
+
 async function main() {
-  const { timeout, headless } = parseArgs();
+  const { timeout, headless, fresh } = parseArgs();
   const deadlineMs = Date.now() + timeout * 1000;
 
-  log("Launching browser for Teams authentication...");
-  if (!headless) {
-    log("Please complete the login in the browser window.");
-  }
+  log(headless ? "Headless token refresh..." : "Launching browser...");
 
   const userDataDir =
     process.env.XDG_STATE_HOME
@@ -60,6 +109,15 @@ async function main() {
       : process.env.HOME
         ? `${process.env.HOME}/.local/state/tmz/browser-profile`
         : `/tmp/tmz-browser-profile`;
+
+  // --fresh: nuke the browser profile to force clean login
+  if (fresh) {
+    const fs = await import("fs");
+    try {
+      fs.rmSync(userDataDir, { recursive: true, force: true });
+      log("Cleared browser profile for fresh login.");
+    } catch {}
+  }
 
   const context = await chromium.launchPersistentContext(userDataDir, {
     headless,
@@ -71,108 +129,78 @@ async function main() {
 
   const page = context.pages()[0] || (await context.newPage());
 
-  // Capture tokens from OAuth responses and localStorage
-  const captured = {};
-  let minExpiresIn = Infinity;
-
-  // Strategy 1a: Intercept network OAuth token responses
-  page.on("response", async (response) => {
-    try {
-      const url = response.url();
-
-      // Capture individual MSAL token grants
-      if (url.includes("oauth2/v2.0/token") && response.status() === 200) {
-        const body = await response.json();
-        if (!body.access_token) return;
-
-        const scope = (body.scope || "").toLowerCase();
-        for (const [resource, name] of Object.entries(REQUIRED_TOKENS)) {
-          if (scope.includes(resource) && !captured[name]) {
-            captured[name] = body.access_token;
-            if (body.expires_in && body.expires_in < minExpiresIn) {
-              minExpiresIn = body.expires_in;
-            }
-            log(`Captured ${name} (via OAuth)`);
-          }
-        }
-      }
-
-      // Strategy 1b: Capture the authz exchange response
-      // This is the endpoint Teams itself uses - most reliable source
-      if (url.includes("authsvc/v1.0/authz") && response.status() === 200) {
-        const body = await response.json();
-        if (body.tokens?.skypeToken) {
-          log("Captured authz response (skypeToken + session)");
-          // The authz skypeToken is the exchanged token Teams uses for chat
-          // Store it as an alternative - Rust side will prefer it
-          captured._authz_skype_token = body.tokens.skypeToken;
-          captured._authz_chat_service = body.regionGtms?.chatService || "";
-        }
-      }
-    } catch {
-      // Ignore response parsing errors
-    }
-  });
-
   try {
     await page.goto(TEAMS_URL, { waitUntil: "domcontentloaded" });
-    log("Waiting for authentication to complete...");
+    log("Waiting for authentication...");
+
+    let clearedCache = false;
+    // On Teams but no tokens after this many polls -> clear cache
+    let onTeamsPolls = 0;
+    const STALE_THRESHOLD = 5; // 10 seconds
 
     while (Date.now() < deadlineMs) {
       await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
 
-      // Check if we have all tokens from network interception
-      if (hasAllTokens(captured)) {
-        return finish(captured, minExpiresIn, context);
+      let url;
+      try {
+        url = page.url();
+      } catch {
+        continue; // page navigating
       }
 
-      // Strategy 2: Check localStorage for Teams v2 tmp.auth format
-      const url = page.url();
-      const isOnTeams =
-        url.includes("teams.microsoft.com") &&
-        !url.includes("login.microsoftonline.com") &&
-        !url.includes("login.live.com");
+      const isOnLogin =
+        url.includes("login.microsoftonline.com") ||
+        url.includes("login.live.com");
 
-      if (!isOnTeams) continue;
-
-      const lsTokens = await extractFromLocalStorage(page);
-      for (const [name, token] of Object.entries(lsTokens)) {
-        if (!captured[name]) {
-          captured[name] = token;
-          log(`Captured ${name} (via localStorage)`);
+      if (isOnLogin) {
+        onTeamsPolls = 0;
+        // In headless mode, if we're on a login page after clearing cache,
+        // SSO cookies have expired. Fail fast.
+        if (headless && clearedCache) {
+          log("ERROR: SSO session expired. Run 'tmz auth login' interactively.");
+          await context.close();
+          process.exit(1);
         }
+        log("On login page, waiting for SSO...");
+        continue;
       }
 
-      if (hasAllTokens(captured)) {
-        return finish(captured, minExpiresIn, context);
+      let tokens;
+      try {
+        tokens = await extractAccessTokens(page);
+      } catch {
+        continue; // context destroyed during navigation
       }
 
-      // Strategy 3: Fallback - old MSAL v1 localStorage format
-      const oldTokens = await extractOldMsalFormat(page);
-      for (const [name, token] of Object.entries(oldTokens)) {
-        if (!captured[name]) {
-          captured[name] = token;
-          log(`Captured ${name} (via MSAL v1)`);
+      if (hasAllRequiredTokens(tokens)) {
+        log("All tokens extracted.");
+        process.stdout.write(JSON.stringify(tokens));
+        await context.close();
+        process.exit(0);
+      }
+
+      onTeamsPolls++;
+
+      // If we're on Teams but have no tokens after threshold, the
+      // cached profile has stale MSAL state. Clear it and reload
+      // to force fresh SSO auth.
+      if (!clearedCache && onTeamsPolls >= STALE_THRESHOLD) {
+        try {
+          const removed = await clearAuthCaches(page);
+          log(`Cleared ${removed} stale auth cache entries, reloading...`);
+          await page.reload({ waitUntil: "domcontentloaded" });
+          clearedCache = true;
+          onTeamsPolls = 0;
+        } catch {
+          // ignore errors during reload
         }
+        continue;
       }
 
-      if (hasAllTokens(captured)) {
-        return finish(captured, minExpiresIn, context);
-      }
-
-      const count = Object.values(REQUIRED_TOKENS).filter((n) => captured[n]).length;
-      const total = Object.keys(REQUIRED_TOKENS).length;
+      const count = Object.keys(tokens).length;
       if (count > 0) {
-        log(`Have ${count}/${total} tokens, waiting for more...`);
-      } else {
-        log("Waiting for tokens...");
+        log(`${count} tokens found, waiting for all ${REQUIRED_RESOURCES.length}...`);
       }
-    }
-
-    // Timed out - but if we have minimum viable tokens, output them
-    if (hasMinimumTokens(captured)) {
-      log("Timeout but have minimum tokens, proceeding...");
-      return finish(captured, minExpiresIn, context);
     }
 
     log("ERROR: Timed out waiting for authentication.");
@@ -183,86 +211,6 @@ async function main() {
     try { await context.close(); } catch {}
     process.exit(1);
   }
-}
-
-function hasAllTokens(captured) {
-  return Object.values(REQUIRED_TOKENS).every((name) => captured[name]);
-}
-
-/** Check if we have enough tokens to work (skype is mandatory). */
-function hasMinimumTokens(captured) {
-  return !!captured.skype_token;
-}
-
-async function finish(captured, minExpiresIn, context) {
-  const count = Object.values(REQUIRED_TOKENS).filter((n) => captured[n]).length;
-  const total = Object.keys(REQUIRED_TOKENS).length;
-  log(`Captured ${count}/${total} tokens.`);
-
-  // Build clean output (exclude internal keys starting with _)
-  const output = {};
-  for (const [k, v] of Object.entries(captured)) {
-    if (!k.startsWith("_")) output[k] = v;
-  }
-
-  // Attach authz data if captured
-  if (captured._authz_skype_token) {
-    output._authz_skype_token = captured._authz_skype_token;
-    output._authz_chat_service = captured._authz_chat_service;
-  }
-
-  if (minExpiresIn < Infinity) {
-    output.expires_in = minExpiresIn;
-  }
-
-  process.stdout.write(JSON.stringify(output));
-  await context.close();
-  process.exit(0);
-}
-
-/** Extract tokens from Teams v2 tmp.auth localStorage format. */
-async function extractFromLocalStorage(page) {
-  return await page.evaluate((resources) => {
-    const tokens = {};
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (!key || !key.includes("Token")) continue;
-
-      for (const [resource, name] of Object.entries(resources)) {
-        if (!key.toUpperCase().includes(resource.toUpperCase())) continue;
-        try {
-          const val = JSON.parse(localStorage.getItem(key));
-          const token = val?.item?.token;
-          if (token && token !== "dummy-token" && token.length > 50) {
-            tokens[name] = token;
-          }
-        } catch {}
-      }
-    }
-    return tokens;
-  }, REQUIRED_TOKENS);
-}
-
-/** Extract tokens from old MSAL v1 localStorage format. */
-async function extractOldMsalFormat(page) {
-  return await page.evaluate((resources) => {
-    const tokens = {};
-    for (let i = 0; i < localStorage.length; i++) {
-      const key = localStorage.key(i);
-      if (!key || !key.includes("accesstoken") || !key.includes("login.windows.net")) continue;
-
-      for (const [resource, name] of Object.entries(resources)) {
-        if (!key.toLowerCase().includes(resource.toLowerCase())) continue;
-        try {
-          const val = JSON.parse(localStorage.getItem(key));
-          if (val?.secret && val.secret.length > 50) {
-            tokens[name] = val.secret;
-          }
-        } catch {}
-      }
-    }
-    return tokens;
-  }, REQUIRED_TOKENS);
 }
 
 main();

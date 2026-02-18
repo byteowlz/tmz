@@ -256,6 +256,9 @@ enum AuthSubcommand {
         /// Skip automated extraction and print manual instructions.
         #[arg(long)]
         manual: bool,
+        /// Clear browser profile and start fresh (fixes "sign in again" errors).
+        #[arg(long)]
+        fresh: bool,
     },
     /// Logout and clear stored tokens.
     Logout,
@@ -501,7 +504,11 @@ async fn handle_auth(_ctx: &RuntimeContext, cmd: AuthSubcommand) -> Result<()> {
             }
             Ok(())
         }
-        AuthSubcommand::Login { timeout, manual } => {
+        AuthSubcommand::Login {
+            timeout,
+            manual,
+            fresh,
+        } => {
             if manual {
                 println!("Opening browser for manual authentication...");
                 let _ = open::that_detached(AuthManager::TEAMS_URL);
@@ -511,7 +518,7 @@ async fn handle_auth(_ctx: &RuntimeContext, cmd: AuthSubcommand) -> Result<()> {
                 return Ok(());
             }
 
-            let tokens = auth.browser_login(Some(timeout), false).await?;
+            let tokens = auth.browser_login(Some(timeout), false, fresh).await?;
             println!("Authenticated as: {}", tokens.user_principal_name);
             println!("Tenant: {}", tokens.tenant_id);
             Ok(())

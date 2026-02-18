@@ -180,17 +180,24 @@ pub async fn run_daemon() -> Result<(), CoreError> {
 
     let mut token_interval = tokio::time::interval(TOKEN_REFRESH_INTERVAL);
     let mut sync_interval = tokio::time::interval(SYNC_INTERVAL);
-
     // Consume the first immediate tick, then run initial tasks
     token_interval.tick().await;
     sync_interval.tick().await;
-    do_token_refresh().await;
+    let mut refresh_paused = !do_token_refresh().await;
     do_sync().await;
 
     loop {
         tokio::select! {
             _ = token_interval.tick() => {
-                do_token_refresh().await;
+                if refresh_paused {
+                    log::info!("token refresh paused (SSO expired). Run 'tmz auth login'.");
+                } else {
+                    let ok = do_token_refresh().await;
+                    if !ok {
+                        refresh_paused = true;
+                        log::warn!("token refresh failed, pausing. Run 'tmz auth login' to re-authenticate.");
+                    }
+                }
             }
             _ = sync_interval.tick() => {
                 do_sync().await;
@@ -209,13 +216,14 @@ pub async fn run_daemon() -> Result<(), CoreError> {
 
 // ─── Periodic tasks ──────────────────────────────────────────────────
 
-async fn do_token_refresh() {
+/// Attempt headless token refresh. Returns `true` on success.
+async fn do_token_refresh() -> bool {
     log::info!("refreshing tokens...");
     let auth = match AuthManager::new() {
         Ok(a) => a,
         Err(e) => {
             log::error!("failed to create auth manager: {e}");
-            return;
+            return false;
         }
     };
 
@@ -223,9 +231,11 @@ async fn do_token_refresh() {
         Ok(tokens) => {
             let remaining = tokens.expires_at - chrono::Utc::now().timestamp();
             log::info!("tokens refreshed (expires in {remaining}s)");
+            true
         }
         Err(e) => {
             log::error!("token refresh failed: {e}");
+            false
         }
     }
 }

@@ -92,11 +92,16 @@ impl AuthManager {
         &self,
         timeout_secs: Option<u64>,
         headless: bool,
+        fresh: bool,
     ) -> Result<TeamsTokens, AuthenticationError> {
         let script_path = find_auth_script()?;
 
         let mut cmd = tokio::process::Command::new("node");
         cmd.arg(&script_path);
+
+        if fresh {
+            cmd.arg("--fresh");
+        }
 
         if let Some(t) = timeout_secs {
             cmd.arg("--timeout").arg(t.to_string());
@@ -174,7 +179,7 @@ impl AuthManager {
     /// Returns an error if headless refresh fails (SSO session expired).
     pub async fn refresh_tokens(&self) -> Result<TeamsTokens, AuthenticationError> {
         log::debug!("attempting headless token refresh");
-        self.browser_login(Some(HEADLESS_TIMEOUT_SECS), true).await
+        self.browser_login(Some(HEADLESS_TIMEOUT_SECS), true, false).await
     }
 
     /// Get valid tokens, auto-refreshing if expired or about to expire.
