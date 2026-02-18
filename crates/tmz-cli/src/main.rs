@@ -50,6 +50,7 @@ fn try_main() -> Result<()> {
             limit,
             no_images,
         } => rt.block_on(handle_msg(&ctx, target, message, file, limit, no_images)),
+        Command::Tldr { chats, per_chat } => rt.block_on(handle_tldr(&ctx, chats, per_chat)),
         Command::Search { query, chat, limit } => {
             rt.block_on(handle_search(&ctx, &query, chat.as_deref(), limit))
         }
@@ -201,6 +202,15 @@ enum Command {
         /// Disable inline image rendering (Kitty graphics protocol).
         #[arg(long)]
         no_images: bool,
+    },
+    /// Show latest messages across your most recent chats.
+    Tldr {
+        /// Number of chats to show (most recently active).
+        #[arg(short = 'n', long, default_value_t = 10)]
+        chats: i64,
+        /// Messages per chat.
+        #[arg(short, long, default_value_t = 5)]
+        per_chat: i64,
     },
     /// Full-text search across cached messages.
     Search {
@@ -768,6 +778,60 @@ async fn handle_msg(
         }
 
         prev_group = Some(group);
+    }
+
+    Ok(())
+}
+
+async fn handle_tldr(ctx: &RuntimeContext, num_chats: i64, per_chat: i64) -> Result<()> {
+    let db = ctx.open_cache().await?;
+    let chat_groups = db.latest_across_chats(num_chats, per_chat).await?;
+
+    if chat_groups.is_empty() {
+        println!("No messages in cache. Run 'tmz sync' first.");
+        return Ok(());
+    }
+
+    if ctx.common.json {
+        let json_out: Vec<serde_json::Value> = chat_groups
+            .iter()
+            .map(|(conv, msgs)| {
+                serde_json::json!({
+                    "conversation": conv,
+                    "messages": msgs,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&json_out)?);
+        return Ok(());
+    }
+
+    for (conv, messages) in &chat_groups {
+        let name = if conv.display_name.is_empty() {
+            &conv.id
+        } else {
+            &conv.display_name
+        };
+
+        // Chat header
+        let conv_type = match conv.thread_type.as_str() {
+            "OneOnOne" => "1:1",
+            "Group" => "group",
+            "Channel" | "Topic" => "channel",
+            "Meeting" => "meeting",
+            other => other,
+        };
+        println!(
+            "\x1b[1m{name}\x1b[0m  \x1b[2m[{conv_type}]\x1b[0m"
+        );
+
+        let groups = group_messages(messages);
+        let mut prev: Option<&MessageGroup<'_>> = None;
+        for g in &groups {
+            print_bubble(g, prev);
+            prev = Some(g);
+        }
+        println!();
     }
 
     Ok(())

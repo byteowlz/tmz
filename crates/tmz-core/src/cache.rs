@@ -347,6 +347,30 @@ impl Cache {
         Ok(msgs)
     }
 
+    /// Get the latest messages across the most recently active conversations.
+    ///
+    /// Returns messages grouped by conversation, ordered by last activity.
+    /// Each conversation returns up to `per_chat` most recent messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database read fails.
+    pub async fn latest_across_chats(
+        &self,
+        num_chats: i64,
+        per_chat: i64,
+    ) -> Result<Vec<(CachedConversation, Vec<CachedMessage>)>, CoreError> {
+        let convs = self.list_conversations(num_chats).await?;
+        let mut result = Vec::new();
+        for conv in convs {
+            let msgs = self.get_messages(&conv.id, per_chat).await?;
+            if !msgs.is_empty() {
+                result.push((conv, msgs));
+            }
+        }
+        Ok(result)
+    }
+
     /// Full-text search across all cached messages.
     ///
     /// # Errors
