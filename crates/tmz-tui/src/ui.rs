@@ -14,13 +14,19 @@ use ratatui::{
 
 // ─── Colors ──────────────────────────────────────────────────────────
 
-const ACCENT: Color = Color::Rgb(88, 101, 242); // Discord-like indigo
-const SELF_COLOR: Color = Color::Cyan;
-const OTHER_COLOR: Color = Color::Yellow;
-const DIM: Color = Color::DarkGray;
-const BG_SELECTED: Color = Color::Rgb(40, 40, 50);
+const ACCENT: Color = Color::Rgb(88, 101, 242); // indigo
+const SELF_COLOR: Color = Color::Rgb(100, 200, 200); // soft teal
+const OTHER_COLOR: Color = Color::Rgb(220, 180, 100); // warm amber
+const DIM: Color = Color::Rgb(90, 90, 100);
+const BG_SELECTED: Color = Color::Rgb(40, 40, 55);
 const BG_INPUT: Color = Color::Rgb(30, 30, 40);
-const SEARCH_HIGHLIGHT: Color = Color::Rgb(255, 180, 0);
+const SEARCH_HIGHLIGHT: Color = Color::Rgb(240, 180, 60); // warm gold
+
+// Thread type bar colors
+const BAR_CHAT: Color = Color::Rgb(100, 200, 200); // teal - 1:1 chats
+const BAR_MEETING: Color = Color::Rgb(220, 180, 100); // amber - meetings
+const BAR_TEAM: Color = Color::Rgb(120, 200, 120); // soft green - teams
+const BAR_CHANNEL: Color = Color::Rgb(180, 140, 220); // lavender - channels
 
 // ─── Main draw ───────────────────────────────────────────────────────
 
@@ -545,10 +551,10 @@ fn key<'a>(keys: &'a str, desc: &'a str) -> Line<'a> {
 /// Color for the left bar based on conversation thread type.
 const fn thread_type_color(thread_type: &str) -> Color {
     match thread_type.as_bytes() {
-        b"chat" | b"sfbinteropchat" => Color::Cyan,
-        b"meeting" => Color::Yellow,
-        b"space" => Color::Green,
-        b"topic" => Color::Magenta,
+        b"chat" | b"sfbinteropchat" => BAR_CHAT,
+        b"meeting" => BAR_MEETING,
+        b"space" => BAR_TEAM,
+        b"topic" => BAR_CHANNEL,
         _ => DIM,
     }
 }
