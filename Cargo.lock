@@ -3363,7 +3363,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tmz-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -3380,7 +3380,7 @@ dependencies = [
 
 [[package]]
 name = "tmz-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3402,7 +3402,7 @@ dependencies = [
 
 [[package]]
 name = "tmz-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -3425,7 +3425,7 @@ dependencies = [
 
 [[package]]
 name = "tmz-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -3440,7 +3440,7 @@ dependencies = [
 
 [[package]]
 name = "tmz-tui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
