@@ -75,23 +75,38 @@ async function main() {
   const captured = {};
   let minExpiresIn = Infinity;
 
-  // Strategy 1: Intercept network OAuth token responses
+  // Strategy 1a: Intercept network OAuth token responses
   page.on("response", async (response) => {
     try {
       const url = response.url();
-      if (!url.includes("oauth2/v2.0/token") || response.status() !== 200) return;
 
-      const body = await response.json();
-      if (!body.access_token) return;
+      // Capture individual MSAL token grants
+      if (url.includes("oauth2/v2.0/token") && response.status() === 200) {
+        const body = await response.json();
+        if (!body.access_token) return;
 
-      const scope = (body.scope || "").toLowerCase();
-      for (const [resource, name] of Object.entries(REQUIRED_TOKENS)) {
-        if (scope.includes(resource) && !captured[name]) {
-          captured[name] = body.access_token;
-          if (body.expires_in && body.expires_in < minExpiresIn) {
-            minExpiresIn = body.expires_in;
+        const scope = (body.scope || "").toLowerCase();
+        for (const [resource, name] of Object.entries(REQUIRED_TOKENS)) {
+          if (scope.includes(resource) && !captured[name]) {
+            captured[name] = body.access_token;
+            if (body.expires_in && body.expires_in < minExpiresIn) {
+              minExpiresIn = body.expires_in;
+            }
+            log(`Captured ${name} (via OAuth)`);
           }
-          log(`Captured ${name} (via network)`);
+        }
+      }
+
+      // Strategy 1b: Capture the authz exchange response
+      // This is the endpoint Teams itself uses - most reliable source
+      if (url.includes("authsvc/v1.0/authz") && response.status() === 200) {
+        const body = await response.json();
+        if (body.tokens?.skypeToken) {
+          log("Captured authz response (skypeToken + session)");
+          // The authz skypeToken is the exchanged token Teams uses for chat
+          // Store it as an alternative - Rust side will prefer it
+          captured._authz_skype_token = body.tokens.skypeToken;
+          captured._authz_chat_service = body.regionGtms?.chatService || "";
         }
       }
     } catch {
@@ -145,13 +160,19 @@ async function main() {
         return finish(captured, minExpiresIn, context);
       }
 
-      const count = Object.keys(captured).length;
+      const count = Object.values(REQUIRED_TOKENS).filter((n) => captured[n]).length;
       const total = Object.keys(REQUIRED_TOKENS).length;
       if (count > 0) {
         log(`Have ${count}/${total} tokens, waiting for more...`);
       } else {
         log("Waiting for tokens...");
       }
+    }
+
+    // Timed out - but if we have minimum viable tokens, output them
+    if (hasMinimumTokens(captured)) {
+      log("Timeout but have minimum tokens, proceeding...");
+      return finish(captured, minExpiresIn, context);
     }
 
     log("ERROR: Timed out waiting for authentication.");
@@ -168,12 +189,32 @@ function hasAllTokens(captured) {
   return Object.values(REQUIRED_TOKENS).every((name) => captured[name]);
 }
 
+/** Check if we have enough tokens to work (skype is mandatory). */
+function hasMinimumTokens(captured) {
+  return !!captured.skype_token;
+}
+
 async function finish(captured, minExpiresIn, context) {
-  log("All required tokens captured.");
-  const output = { ...captured };
+  const count = Object.values(REQUIRED_TOKENS).filter((n) => captured[n]).length;
+  const total = Object.keys(REQUIRED_TOKENS).length;
+  log(`Captured ${count}/${total} tokens.`);
+
+  // Build clean output (exclude internal keys starting with _)
+  const output = {};
+  for (const [k, v] of Object.entries(captured)) {
+    if (!k.startsWith("_")) output[k] = v;
+  }
+
+  // Attach authz data if captured
+  if (captured._authz_skype_token) {
+    output._authz_skype_token = captured._authz_skype_token;
+    output._authz_chat_service = captured._authz_chat_service;
+  }
+
   if (minExpiresIn < Infinity) {
     output.expires_in = minExpiresIn;
   }
+
   process.stdout.write(JSON.stringify(output));
   await context.close();
   process.exit(0);
