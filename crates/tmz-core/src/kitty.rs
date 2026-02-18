@@ -2,6 +2,9 @@
 //!
 //! Renders images inline in terminals that support the Kitty graphics protocol
 //! (Kitty, `WezTerm`, Ghostty, etc.) using base64-encoded escape sequences.
+//!
+//! When running inside tmux, escapes are wrapped in DCS passthrough sequences
+//! so they reach the outer terminal.
 
 use base64::Engine;
 use std::io::{self, Write};
@@ -11,7 +14,8 @@ const MAX_COLS: u32 = 60;
 
 /// Check whether the terminal likely supports the Kitty graphics protocol.
 ///
-/// Checks `$TERM` and `$TERM_PROGRAM` environment variables.
+/// Checks `$TERM`, `$TERM_PROGRAM`, and terminal-specific env vars.
+/// Also detects Kitty-capable terminals behind tmux.
 #[must_use]
 pub fn is_supported() -> bool {
     let term = std::env::var("TERM").unwrap_or_default();
@@ -25,6 +29,28 @@ pub fn is_supported() -> bool {
         || term_program.contains("Ghostty")
         || std::env::var("KITTY_WINDOW_ID").is_ok()
         || std::env::var("GHOSTTY_RESOURCES_DIR").is_ok()
+}
+
+/// Check if we are running inside tmux.
+#[must_use]
+fn in_tmux() -> bool {
+    std::env::var("TMUX").is_ok()
+}
+
+/// Write a Kitty graphics escape sequence, wrapping in tmux DCS passthrough
+/// if needed.
+///
+/// Inside tmux, the Kitty `\x1b_G...\x1b\\` must be wrapped as:
+/// `\x1bPtmux;\x1b\x1b_G...\x1b\x1b\\\x1b\\`
+fn write_kitty_escape(stdout: &mut impl Write, payload: &str) -> io::Result<()> {
+    if in_tmux() {
+        // tmux DCS passthrough: \ePtmux;\e<escaped_sequence>\e\\
+        // Inside the passthrough, every \e must be doubled
+        write!(stdout, "\x1bPtmux;\x1b\x1b_G{payload}\x1b\x1b\\\x1b\\")?;
+    } else {
+        write!(stdout, "\x1b_G{payload}\x1b\\")?;
+    }
+    Ok(())
 }
 
 /// Display an image inline in the terminal using the Kitty graphics protocol.
@@ -58,12 +84,12 @@ pub fn display_image(data: &[u8]) -> io::Result<()> {
         let m = i32::from(!is_last);
 
         if i == 0 {
-            write!(
-                stdout,
-                "\x1b_Ga=T,f=100,C=1,c={MAX_COLS},m={m};{chunk}\x1b\\"
+            write_kitty_escape(
+                &mut stdout,
+                &format!("a=T,f=100,C=1,c={MAX_COLS},m={m};{chunk}"),
             )?;
         } else {
-            write!(stdout, "\x1b_Gm={m};{chunk}\x1b\\")?;
+            write_kitty_escape(&mut stdout, &format!("m={m};{chunk}"))?;
         }
     }
 

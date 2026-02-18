@@ -142,13 +142,25 @@ impl AuthManager {
             AuthenticationError::TokenExtractionError(format!("invalid UTF-8 output: {e}"))
         })?;
 
-        let local_storage: std::collections::HashMap<String, String> =
+        let output: serde_json::Value =
             serde_json::from_str(&stdout).map_err(|e| {
                 AuthenticationError::TokenExtractionError(format!(
                     "parsing token output: {e}"
                 ))
             })?;
 
+        // New format: { "skype_token": "...", "chat_token": "...", ... }
+        if output.get("skype_token").is_some() {
+            return self.store_tokens_from_script_output(&output);
+        }
+
+        // Legacy format: raw localStorage HashMap
+        let local_storage: std::collections::HashMap<String, String> =
+            serde_json::from_value(output).map_err(|e| {
+                AuthenticationError::TokenExtractionError(format!(
+                    "parsing token output: {e}"
+                ))
+            })?;
         self.store_tokens_from_browser(&local_storage)
     }
 
@@ -223,6 +235,49 @@ impl AuthManager {
             ));
         }
 
+        Ok(tokens)
+    }
+
+    /// Store tokens from the new script output format.
+    ///
+    /// The script outputs `{ "skype_token", "chat_token", "graph_token",
+    /// "presence_token", "expires_in" }`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if required fields are missing or JWT parsing fails.
+    fn store_tokens_from_script_output(
+        &self,
+        output: &serde_json::Value,
+    ) -> Result<TeamsTokens, AuthenticationError> {
+        let get = |field: &str| -> Result<String, AuthenticationError> {
+            output[field]
+                .as_str()
+                .map(String::from)
+                .ok_or_else(|| {
+                    AuthenticationError::TokenExtractionError(format!("missing {field} in output"))
+                })
+        };
+
+        let skype_token = get("skype_token")?;
+        let chat_token = get("chat_token")?;
+        let graph_token = get("graph_token")?;
+        let presence_token = get("presence_token")?;
+
+        let (tenant_id, user_id, upn, expires_at) = parse_token_claims(&skype_token)?;
+
+        let tokens = TeamsTokens {
+            skype_token,
+            chat_token,
+            graph_token,
+            presence_token,
+            tenant_id,
+            user_id,
+            user_principal_name: upn,
+            expires_at,
+        };
+
+        self.storage.store_tokens(&tokens)?;
         Ok(tokens)
     }
 

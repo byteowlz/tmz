@@ -56,6 +56,14 @@ impl TeamsClient {
             .map_err(|e| CoreError::Auth(format!("auth check: {e}")))
     }
 
+    /// Get valid tokens, auto-refreshing via headless browser if expired.
+    async fn valid_tokens(&self) -> Result<crate::TeamsTokens, CoreError> {
+        self.auth
+            .get_tokens_or_refresh()
+            .await
+            .map_err(|e| CoreError::Auth(format!("not authenticated: {e}")))
+    }
+
     /// Exchange the MSAL skype access token for a Teams session.
     ///
     /// Calls `POST /api/authsvc/v1.0/authz` to get a skypeToken and
@@ -65,10 +73,7 @@ impl TeamsClient {
     ///
     /// Returns an error if not authenticated or the authz call fails.
     pub async fn get_session(&self) -> Result<TeamsSession, CoreError> {
-        let tokens = self
-            .auth
-            .get_tokens()
-            .map_err(|e| CoreError::Auth(format!("not authenticated: {e}")))?;
+        let tokens = self.valid_tokens().await?;
 
         let response = self
             .http_client
@@ -421,10 +426,7 @@ impl TeamsClient {
     ///
     /// Returns an error if not authenticated or request fails.
     pub async fn list_teams(&self) -> Result<Vec<serde_json::Value>, CoreError> {
-        let tokens = self
-            .auth
-            .get_tokens()
-            .map_err(|e| CoreError::Auth(format!("not authenticated: {e}")))?;
+        let tokens = self.valid_tokens().await?;
 
         let url = "https://graph.microsoft.com/v1.0/me/joinedTeams";
 
@@ -463,10 +465,7 @@ impl TeamsClient {
     ///
     /// Returns an error if not authenticated or request fails.
     pub async fn list_channels(&self, team_id: &str) -> Result<Vec<serde_json::Value>, CoreError> {
-        let tokens = self
-            .auth
-            .get_tokens()
-            .map_err(|e| CoreError::Auth(format!("not authenticated: {e}")))?;
+        let tokens = self.valid_tokens().await?;
 
         let url = format!(
             "https://graph.microsoft.com/v1.0/teams/{}/channels",
@@ -524,10 +523,7 @@ impl TeamsClient {
     ///
     /// Returns an error if not authenticated or request fails.
     pub async fn get_user_presence(&self, user_id: &str) -> Result<UserPresence, CoreError> {
-        let tokens = self
-            .auth
-            .get_tokens()
-            .map_err(|e| CoreError::Auth(format!("not authenticated: {e}")))?;
+        let tokens = self.valid_tokens().await?;
 
         let url = format!(
             "https://presence.teams.microsoft.com/v1/presence/{}",
@@ -577,10 +573,7 @@ impl TeamsClient {
     ///
     /// Returns an error if not authenticated or request fails.
     pub async fn get_me(&self) -> Result<serde_json::Value, CoreError> {
-        let tokens = self
-            .auth
-            .get_tokens()
-            .map_err(|e| CoreError::Auth(format!("not authenticated: {e}")))?;
+        let tokens = self.valid_tokens().await?;
 
         let response = self
             .http_client
@@ -614,10 +607,7 @@ impl TeamsClient {
     /// Returns an error if not authenticated, the request fails, or the URL
     /// is not reachable.
     pub async fn download_image(&self, url: &str) -> Result<Vec<u8>, CoreError> {
-        let tokens = self
-            .auth
-            .get_tokens()
-            .map_err(|e| CoreError::Auth(format!("not authenticated: {e}")))?;
+        let tokens = self.valid_tokens().await?;
 
         let response = self
             .http_client
