@@ -39,7 +39,9 @@ fn try_main() -> Result<()> {
             limit,
             no_images,
         } => rt.block_on(handle_msg(&ctx, target, message, file, limit, no_images)),
-        Command::Search { query, limit } => rt.block_on(handle_search(&ctx, &query, limit)),
+        Command::Search { query, chat, limit } => {
+            rt.block_on(handle_search(&ctx, &query, chat.as_deref(), limit))
+        }
         Command::Find { query, conv_type } => rt.block_on(handle_find(&ctx, &query, conv_type)),
         Command::Alias {
             name,
@@ -193,6 +195,9 @@ enum Command {
     Search {
         /// Search query (FTS5 syntax).
         query: String,
+        /// Scope to a specific chat (alias, name, or ID).
+        #[arg(short, long, value_name = "CHAT")]
+        chat: Option<String>,
         /// Max results.
         #[arg(short, long, default_value_t = 20)]
         limit: i64,
@@ -740,12 +745,33 @@ async fn handle_msg(
     Ok(())
 }
 
-async fn handle_search(ctx: &RuntimeContext, query: &str, limit: i64) -> Result<()> {
+async fn handle_search(
+    ctx: &RuntimeContext,
+    query: &str,
+    chat: Option<&str>,
+    limit: i64,
+) -> Result<()> {
     let db = ctx.open_cache().await?;
-    let results = db.search(query, limit).await?;
+
+    let (results, scope_name) = if let Some(target) = chat {
+        let conv_id = ctx.resolve_target(&db, target).await?;
+        let convs = db.find_conversation(&conv_id).await?;
+        let name = convs
+            .first()
+            .map_or_else(|| conv_id.clone(), |c| c.display_name.clone());
+        let res = db.search_in_conversation(query, &conv_id, limit).await?;
+        (res, Some(name))
+    } else {
+        let res = db.search(query, limit).await?;
+        (res, None)
+    };
 
     if results.is_empty() {
-        println!("No results for '{query}'.");
+        if let Some(ref name) = scope_name {
+            println!("No results for '{query}' in {name}.");
+        } else {
+            println!("No results for '{query}'.");
+        }
         return Ok(());
     }
 
@@ -754,19 +780,84 @@ async fn handle_search(ctx: &RuntimeContext, query: &str, limit: i64) -> Result<
         return Ok(());
     }
 
-    println!("{} result(s) for '{query}':\n", results.len());
-    for r in &results {
-        let time = format_time(&r.message.compose_time);
-        let conv = if r.conversation_name.is_empty() {
-            &r.message.conversation_id
-        } else {
-            &r.conversation_name
-        };
+    // Header
+    if let Some(ref name) = scope_name {
         println!(
-            "  [{time}] {conv} / {}:",
-            r.message.from_display_name
+            "\x1b[1m{}\x1b[0m result(s) for '\x1b[1m{query}\x1b[0m' in \x1b[1m{name}\x1b[0m",
+            results.len()
         );
-        println!("    {}", truncate(&r.message.content, 120));
+    } else {
+        println!(
+            "\x1b[1m{}\x1b[0m result(s) for '\x1b[1m{query}\x1b[0m'",
+            results.len()
+        );
+    }
+
+    let w = term_width();
+    let query_lower = query.to_lowercase();
+    let query_words: Vec<&str> = query_lower.split_whitespace().collect();
+
+    let mut prev_date: Option<String> = None;
+    for r in &results {
+        let date = extract_date(&r.message.compose_time);
+
+        // Date separator
+        if prev_date.as_deref() != Some(&date) {
+            let label = format_date_label(&date);
+            let total_pad = w.saturating_sub(label.len() + 4);
+            let left = total_pad / 2;
+            let right = total_pad - left;
+            println!(
+                "\x1b[2m{:\u{2500}<left$} {label} {:\u{2500}<right$}\x1b[0m",
+                "", ""
+            );
+            prev_date = Some(date);
+        }
+
+        let time = format_time_short(&r.message.compose_time);
+        let name = if r.message.from_display_name.is_empty() {
+            "(system)"
+        } else {
+            &r.message.from_display_name
+        };
+        let conv = if scope_name.is_some() || r.conversation_name.is_empty() {
+            String::new()
+        } else {
+            format!(" \x1b[2min {}\x1b[0m", r.conversation_name)
+        };
+
+        let bar_color = if r.message.is_from_me { "36" } else { "33" };
+        let name_color = if r.message.is_from_me {
+            "1;36"
+        } else {
+            "1;33"
+        };
+
+        // Header line
+        let name_vis = visible_len(name) + visible_len(&conv);
+        let time_vis = visible_len(&time);
+        let content_w = w.saturating_sub(6);
+        let gap = content_w.saturating_sub(name_vis + time_vis);
+        println!(
+            "  \x1b[{bar_color}m\u{2502}\x1b[0m \x1b[{name_color}m{name}\x1b[0m{conv}{:gap$}\x1b[2m{time}\x1b[0m",
+            ""
+        );
+
+        // Content with highlighted matches
+        let content = r.message.content.trim();
+        let content_w_inner = w.saturating_sub(6);
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let shortened = shorten_urls(trimmed, 50);
+            let highlighted = highlight_matches(&shortened, &query_words);
+            let wrapped = wrap_lines(&[highlighted], content_w_inner);
+            for wl in &wrapped {
+                println!("  \x1b[{bar_color}m\u{2502}\x1b[0m {wl}");
+            }
+        }
         println!();
     }
 
@@ -1362,6 +1453,46 @@ fn print_bubble(group: &MessageGroup<'_>, prev: Option<&MessageGroup<'_>>) {
     for line in &wrapped {
         println!("  \x1b[{bar_color}m\u{2502}\x1b[0m {line}");
     }
+}
+
+/// Highlight search query words in text using bold + underline.
+fn highlight_matches(text: &str, query_words: &[&str]) -> String {
+    if query_words.is_empty() {
+        return text.to_string();
+    }
+
+    let mut result = String::with_capacity(text.len() * 2);
+    let lower = text.to_lowercase();
+    let mut pos = 0;
+
+    while pos < text.len() {
+        let mut best_match: Option<(usize, usize)> = None; // (start, end)
+
+        for word in query_words {
+            if let Some(found) = lower[pos..].find(word) {
+                let abs_start = pos + found;
+                let abs_end = abs_start + word.len();
+                if best_match.is_none_or(|(s, _)| abs_start < s) {
+                    best_match = Some((abs_start, abs_end));
+                }
+            }
+        }
+
+        if let Some((start, end)) = best_match {
+            // Text before match
+            result.push_str(&text[pos..start]);
+            // Highlighted match (bold + magenta)
+            result.push_str("\x1b[1;35m");
+            result.push_str(&text[start..end]);
+            result.push_str("\x1b[0m");
+            pos = end;
+        } else {
+            result.push_str(&text[pos..]);
+            break;
+        }
+    }
+
+    result
 }
 
 /// Shorten URLs in text to a maximum display length.

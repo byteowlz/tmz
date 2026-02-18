@@ -377,6 +377,43 @@ impl Cache {
             .collect())
     }
 
+    /// Full-text search within a specific conversation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database read fails.
+    pub async fn search_in_conversation(
+        &self,
+        query: &str,
+        conversation_id: &str,
+        limit: i64,
+    ) -> Result<Vec<SearchResult>, CoreError> {
+        let rows = sqlx::query(
+            "SELECT m.*, c.display_name AS conversation_name
+             FROM messages_fts fts
+             JOIN messages m ON m.rowid = fts.rowid
+             LEFT JOIN conversations c ON c.id = m.conversation_id
+             WHERE messages_fts MATCH ?
+               AND m.conversation_id = ?
+             ORDER BY m.compose_time DESC
+             LIMIT ?",
+        )
+        .bind(query)
+        .bind(conversation_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| CoreError::Other(format!("searching messages: {e}")))?;
+
+        Ok(rows
+            .iter()
+            .map(|row| SearchResult {
+                message: row_to_message(row),
+                conversation_name: row.get::<String, _>("conversation_name"),
+            })
+            .collect())
+    }
+
     /// Get cache statistics.
     ///
     /// # Errors
