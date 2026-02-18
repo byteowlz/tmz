@@ -14,19 +14,25 @@ use ratatui::{
 
 // ─── Colors ──────────────────────────────────────────────────────────
 
-const ACCENT: Color = Color::Rgb(88, 101, 242); // indigo
-const SELF_COLOR: Color = Color::Rgb(100, 200, 200); // soft teal
-const OTHER_COLOR: Color = Color::Rgb(220, 180, 100); // warm amber
-const DIM: Color = Color::Rgb(90, 90, 100);
-const BG_SELECTED: Color = Color::Rgb(40, 40, 55);
-const BG_INPUT: Color = Color::Rgb(30, 30, 40);
-const SEARCH_HIGHLIGHT: Color = Color::Rgb(240, 180, 60); // warm gold
+// All colors use the terminal's ANSI palette so they adapt to the user's theme.
+// The 16 standard colors (Color::Black through Color::White and their "bright"
+// variants) are remapped by the terminal emulator to match Catppuccin, Dracula,
+// Gruvbox, Solarized, etc.
+
+const ACCENT: Color = Color::Blue;
+const SELF_COLOR: Color = Color::Cyan;
+const OTHER_COLOR: Color = Color::Yellow;
+const DIM: Color = Color::DarkGray;
+// 236 = #303030, subtle highlight that works across themes
+const BG_SELECTED: Color = Color::Indexed(236);
+const BG_INPUT: Color = Color::Reset;
+const SEARCH_HIGHLIGHT: Color = Color::Yellow;
 
 // Thread type bar colors
-const BAR_CHAT: Color = Color::Rgb(100, 200, 200); // teal - 1:1 chats
-const BAR_MEETING: Color = Color::Rgb(220, 180, 100); // amber - meetings
-const BAR_TEAM: Color = Color::Rgb(120, 200, 120); // soft green - teams
-const BAR_CHANNEL: Color = Color::Rgb(180, 140, 220); // lavender - channels
+const BAR_CHAT: Color = Color::Cyan;
+const BAR_MEETING: Color = Color::Yellow;
+const BAR_TEAM: Color = Color::Green;
+const BAR_CHANNEL: Color = Color::Magenta;
 
 // ─── Main draw ───────────────────────────────────────────────────────
 
