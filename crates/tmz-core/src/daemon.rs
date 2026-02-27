@@ -367,7 +367,7 @@ async fn do_sync() {
                 let empty_msgs = Vec::new();
                 let msgs = data.as_array().unwrap_or(&empty_msgs);
                 for msg_json in msgs {
-                    if let Some(msg) = parse_message(msg_json, &conv.id) {
+                    if let Some(msg) = parse_message(msg_json, &conv.id, None) {
                         if let Err(e) = cache.upsert_message(&msg).await {
                             log::error!("failed to upsert message: {e}");
                         } else {

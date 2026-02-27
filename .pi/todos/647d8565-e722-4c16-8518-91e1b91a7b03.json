@@ -1,0 +1,29 @@
+{
+  "todos": [
+    {
+      "id": "fix-system",
+      "content": "Fix 'is_from_me' detection in parse_message using skype_id comparison",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "add-sync-flag",
+      "content": "Add -s/--sync flag to tmz msg to sync conversation first",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "update-sync",
+      "content": "Update sync command to pass user_id to parse_message",
+      "status": "completed",
+      "priority": "high"
+    },
+    {
+      "id": "build-test",
+      "content": "Test and build the changes",
+      "status": "completed",
+      "priority": "high"
+    }
+  ],
+  "updated_at": "2026-02-27T11:15:30.918Z"
+}

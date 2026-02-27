@@ -810,8 +810,19 @@ pub fn parse_conversation(conv: &serde_json::Value) -> CachedConversation {
 }
 
 /// Parse a Teams API message JSON object into a `CachedMessage`.
+///
+/// # Arguments
+///
+/// * `msg` - The JSON message object from the Teams API
+/// * `conversation_id` - The conversation/thread ID
+/// * `my_name` - Optional display name of the current user, used when
+///   `imdisplayname` is empty but `isFromMe` is true
 #[must_use]
-pub fn parse_message(msg: &serde_json::Value, conversation_id: &str) -> Option<CachedMessage> {
+pub fn parse_message(
+    msg: &serde_json::Value,
+    conversation_id: &str,
+    my_name: Option<&str>,
+) -> Option<CachedMessage> {
     let msg_type = msg["messagetype"].as_str().unwrap_or("");
 
     // Skip system/control messages, keep text, rich text, and file/media messages
@@ -830,9 +841,23 @@ pub fn parse_message(msg: &serde_json::Value, conversation_id: &str) -> Option<C
     let id = msg["id"].as_str().unwrap_or("").to_string();
     let content_html = msg["content"].as_str().unwrap_or("").to_string();
     let content = strip_html(&content_html);
-    let from_name = msg["imdisplayname"].as_str().unwrap_or("").to_string();
     let compose_time = msg["composetime"].as_str().unwrap_or("").to_string();
     let is_from_me = msg["isFromMe"].as_bool().unwrap_or(false);
+
+    // Get sender name - use my_name if isFromMe and imdisplayname is empty
+    let from_name = msg["imdisplayname"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(std::string::ToString::to_string)
+        .or_else(|| {
+            if is_from_me {
+                my_name.map(std::string::ToString::to_string)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+
     let raw_json = serde_json::to_string(msg).unwrap_or_default();
 
     Some(CachedMessage {

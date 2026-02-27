@@ -49,7 +49,8 @@ fn try_main() -> Result<()> {
             file,
             limit,
             no_images,
-        } => rt.block_on(handle_msg(&ctx, target, message, file, limit, no_images)),
+            sync,
+        } => rt.block_on(handle_msg(&ctx, target, message, file, limit, no_images, sync)),
         Command::Tldr { chats, per_chat } => rt.block_on(handle_tldr(&ctx, chats, per_chat)),
         Command::Search { query, chat, limit } => {
             rt.block_on(handle_search(&ctx, &query, chat.as_deref(), limit))
@@ -203,6 +204,9 @@ enum Command {
         /// Disable inline image rendering (Kitty graphics protocol).
         #[arg(long)]
         no_images: bool,
+        /// Sync this conversation before showing messages.
+        #[arg(short, long)]
+        sync: bool,
     },
     /// Show latest messages across your most recent chats.
     Tldr {
@@ -594,6 +598,13 @@ async fn handle_sync(ctx: &RuntimeContext, cmd: SyncCommand) -> Result<()> {
     let client = TeamsClient::new()?;
     let db = ctx.open_cache().await?;
 
+    // Get current user info for proper message attribution
+    let my_name: Option<String> = client
+        .get_me()
+        .await
+        .ok()
+        .and_then(|u| u["displayName"].as_str().map(std::string::ToString::to_string));
+
     // 1. Sync conversations
     eprint!("Syncing conversations... ");
     let data = client.list_chats().await?;
@@ -636,7 +647,7 @@ async fn handle_sync(ctx: &RuntimeContext, cmd: SyncCommand) -> Result<()> {
                 Ok(msg_data) => {
                     if let Some(messages) = msg_data["messages"].as_array() {
                         for msg in messages {
-                            if let Some(cached) = cache::parse_message(msg, &conv.id) {
+                            if let Some(cached) = cache::parse_message(msg, &conv.id, my_name.as_deref()) {
                                 // Extract image URLs for caching
                                 let urls =
                                     tmz_core::kitty::extract_image_urls(&cached.content_html);
@@ -718,6 +729,28 @@ async fn handle_chats(ctx: &RuntimeContext, cmd: ChatsCommand) -> Result<()> {
     Ok(())
 }
 
+/// Sync messages for a specific conversation.
+async fn sync_conversation(db: &tmz_core::Cache, conv_id: &str, limit: i64) -> Result<u64> {
+    let client = TeamsClient::new()?;
+    let me = client.get_me().await.map_err(|e| anyhow!("get user info: {e}"))?;
+    let my_name = me["displayName"].as_str();
+    let limit_i32 = i32::try_from(limit).unwrap_or(50);
+    
+    let data = client.get_chat_messages(conv_id, Some(limit_i32)).await
+        .map_err(|e| anyhow!("fetch messages: {e}"))?;
+    
+    let mut count = 0u64;
+    if let Some(msgs) = data["messages"].as_array() {
+        for msg in msgs {
+            if let Some(cached) = cache::parse_message(msg, conv_id, my_name) {
+                let _ = db.upsert_message(&cached).await;
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
+}
+
 async fn handle_msg(
     ctx: &RuntimeContext,
     target: String,
@@ -725,9 +758,19 @@ async fn handle_msg(
     file: Option<PathBuf>,
     limit: i64,
     no_images: bool,
+    sync: bool,
 ) -> Result<()> {
     let db = ctx.open_cache().await?;
     let conv_id = ctx.resolve_target(&db, &target).await?;
+
+    // Sync messages for this conversation if requested
+    if sync {
+        eprint!("Syncing conversation... ");
+        match sync_conversation(&db, &conv_id, limit).await {
+            Ok(count) => eprintln!("{count} messages synced."),
+            Err(e) => eprintln!("failed: {e}"),
+        }
+    }
 
     // Send file if --file is specified
     if let Some(ref file_path) = file {
@@ -762,8 +805,8 @@ async fn handle_msg(
     // Show recent messages (prefer cache, fall back to API)
     let messages = db.get_messages(&conv_id, limit).await?;
 
-    if messages.is_empty() {
-        // Try live fetch
+    // Fetch live if no cached messages
+    let messages = if messages.is_empty() {
         eprintln!("No cached messages. Fetching from API...");
         let client = TeamsClient::new()?;
         let limit_i32 = i32::try_from(limit).unwrap_or(20);
@@ -773,19 +816,17 @@ async fn handle_msg(
             return Ok(());
         }
         if let Some(msgs) = data["messages"].as_array() {
-            let parsed: Vec<_> = msgs
-                .iter()
-                .filter_map(|m| cache::parse_message(m, &conv_id))
-                .collect();
-            let groups = group_messages(&parsed);
-            let mut prev_g: Option<&MessageGroup<'_>> = None;
-            for g in &groups {
-                print_bubble(g, prev_g);
-                prev_g = Some(g);
-            }
+            let my_name = client.get_me().await.ok()
+                .and_then(|u| u["displayName"].as_str().map(std::string::ToString::to_string));
+            msgs.iter()
+                .filter_map(|m| cache::parse_message(m, &conv_id, my_name.as_deref()))
+                .collect()
+        } else {
+            Vec::new()
         }
-        return Ok(());
-    }
+    } else {
+        messages
+    };
 
     if ctx.common.json {
         println!("{}", serde_json::to_string_pretty(&messages)?);
@@ -801,49 +842,60 @@ async fn handle_msg(
 
     let show_images = !no_images && tmz_core::kitty::is_supported();
 
-    // Group consecutive messages from the same sender into bubbles
-    let groups = group_messages(&messages);
+    render_messages(&messages, &db, show_images).await
+}
+
+/// Render message groups with optional inline images.
+async fn render_messages(
+    messages: &[tmz_core::CachedMessage],
+    db: &tmz_core::Cache,
+    show_images: bool,
+) -> Result<()> {
+    let groups = group_messages(messages);
     let mut prev_group: Option<&MessageGroup<'_>> = None;
 
     for group in &groups {
         print_bubble(group, prev_group);
 
-        // Render inline images via Kitty protocol
         if show_images {
-            for msg in &group.messages {
-                let urls = tmz_core::kitty::extract_image_urls(&msg.content_html);
-                for url in &urls {
-                    // Try cache first, fall back to network
-                    let image_data = if let Ok(Some(data)) = db.get_image(url).await {
-                        Some(data)
-                    } else if let Ok(client) = TeamsClient::new() {
-                        match client.download_image(url).await {
-                            Ok(data) => {
-                                let _ = db.cache_image(url, &data, "image/png").await;
-                                Some(data)
-                            }
-                            Err(e) => {
-                                debug!("image download failed: {e}");
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    };
-
-                    if let Some(data) = image_data
-                        && let Err(e) = tmz_core::kitty::display_image(&data)
-                    {
-                        debug!("kitty image render failed: {e}");
-                    }
-                }
-            }
+            render_message_images(&group.messages, db).await;
         }
 
         prev_group = Some(group);
     }
 
     Ok(())
+}
+
+/// Render inline images for a set of messages.
+async fn render_message_images(messages: &[&tmz_core::CachedMessage], db: &tmz_core::Cache) {
+    for msg in messages {
+        let urls = tmz_core::kitty::extract_image_urls(&msg.content_html);
+        for url in &urls {
+            let image_data = if let Ok(Some(data)) = db.get_image(url).await {
+                Some(data)
+            } else if let Ok(client) = TeamsClient::new() {
+                match client.download_image(url).await {
+                    Ok(data) => {
+                        let _ = db.cache_image(url, &data, "image/png").await;
+                        Some(data)
+                    }
+                    Err(e) => {
+                        debug!("image download failed: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            if let Some(data) = image_data
+                && let Err(e) = tmz_core::kitty::display_image(&data)
+            {
+                debug!("kitty image render failed: {e}");
+            }
+        }
+    }
 }
 
 async fn handle_tldr(ctx: &RuntimeContext, num_chats: i64, per_chat: i64) -> Result<()> {
