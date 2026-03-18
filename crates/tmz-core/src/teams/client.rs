@@ -9,9 +9,9 @@
 //! Graph API is still used for operations where it has sufficient scopes
 //! (e.g., listing joined teams, channels).
 
+use crate::CoreError;
 use crate::teams::auth::AuthManager;
 use crate::teams::models::{PresenceStatus, TeamsSession, UserPresence};
-use crate::CoreError;
 use reqwest::Client;
 
 /// Teams API client.
@@ -32,17 +32,14 @@ impl TeamsClient {
     /// Returns an error if HTTP client creation fails.
     pub fn new() -> Result<Self, CoreError> {
         let http_client = Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(std::time::Duration::from_mins(1))
             .build()
             .map_err(|e| CoreError::Other(format!("creating HTTP client: {e}")))?;
 
         let auth = AuthManager::new()
             .map_err(|e| CoreError::Other(format!("creating auth manager: {e}")))?;
 
-        Ok(Self {
-            http_client,
-            auth,
-        })
+        Ok(Self { http_client, auth })
     }
 
     /// Check if authenticated and tokens are valid.
@@ -87,9 +84,7 @@ impl TeamsClient {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(CoreError::Api(format!(
-                "authz failed: {status} - {text}"
-            )));
+            return Err(CoreError::Api(format!("authz failed: {status} - {text}")));
         }
 
         let settings: serde_json::Value = response
@@ -143,7 +138,10 @@ impl TeamsClient {
         let response = self
             .http_client
             .get(&url)
-            .header("Authentication", format!("skypetoken={}", session.skype_token))
+            .header(
+                "Authentication",
+                format!("skypetoken={}", session.skype_token),
+            )
             .send()
             .await
             .map_err(|e| CoreError::Api(format!("request failed: {e}")))?;
@@ -188,7 +186,10 @@ impl TeamsClient {
         let response = self
             .http_client
             .get(&url)
-            .header("Authentication", format!("skypetoken={}", session.skype_token))
+            .header(
+                "Authentication",
+                format!("skypetoken={}", session.skype_token),
+            )
             .send()
             .await
             .map_err(|e| CoreError::Api(format!("request failed: {e}")))?;
@@ -207,7 +208,10 @@ impl TeamsClient {
             .map_err(|e| CoreError::Serialization(format!("parsing response: {e}")))?;
 
         // Mark messages from the current user
-        if let Some(messages) = data.get_mut("messages").and_then(serde_json::Value::as_array_mut) {
+        if let Some(messages) = data
+            .get_mut("messages")
+            .and_then(serde_json::Value::as_array_mut)
+        {
             for msg in messages {
                 let is_from_me = msg["from"]
                     .as_str()
@@ -244,7 +248,10 @@ impl TeamsClient {
         let response = self
             .http_client
             .post(&url)
-            .header("Authentication", format!("skypetoken={}", session.skype_token))
+            .header(
+                "Authentication",
+                format!("skypetoken={}", session.skype_token),
+            )
             .json(&body)
             .send()
             .await
@@ -294,16 +301,23 @@ impl TeamsClient {
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        let is_image = matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp");
-        let is_video = matches!(
+        let is_image = matches!(
             ext.as_str(),
-            "mp4" | "mov" | "m4v" | "webm" | "avi" | "mkv"
+            "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp"
         );
+        let is_video = matches!(ext.as_str(), "mp4" | "mov" | "m4v" | "webm" | "avi" | "mkv");
 
         if is_image {
             // Images: upload to ASM blob store and send as inline image
             let obj_id = self
-                .upload_to_asm(&session, conversation_id, &file_name, &file_bytes, &ext, true)
+                .upload_to_asm(
+                    &session,
+                    conversation_id,
+                    &file_name,
+                    &file_bytes,
+                    &ext,
+                    true,
+                )
                 .await?;
 
             let obj_url = format!("https://api.asm.skype.com/v1/objects/{obj_id}");
@@ -315,7 +329,14 @@ impl TeamsClient {
         } else if is_video {
             // Videos: upload to ASM and send as Media_GenericFile to trigger preview
             let obj_id = self
-                .upload_to_asm(&session, conversation_id, &file_name, &file_bytes, &ext, false)
+                .upload_to_asm(
+                    &session,
+                    conversation_id,
+                    &file_name,
+                    &file_bytes,
+                    &ext,
+                    false,
+                )
                 .await?;
 
             let (msg_type, msg_content) =
@@ -326,14 +347,26 @@ impl TeamsClient {
                 .await
             {
                 Ok(resp) => Ok(resp),
-                Err(_) => self
-                    .send_onedrive_link(conversation_id, &session, &tokens.graph_token, &file_name, &file_bytes)
-                    .await,
+                Err(_) => {
+                    self.send_onedrive_link(
+                        conversation_id,
+                        &session,
+                        &tokens.graph_token,
+                        &file_name,
+                        &file_bytes,
+                    )
+                    .await
+                }
             }
         } else {
-            self
-                .send_onedrive_link(conversation_id, &session, &tokens.graph_token, &file_name, &file_bytes)
-                .await
+            self.send_onedrive_link(
+                conversation_id,
+                &session,
+                &tokens.graph_token,
+                &file_name,
+                &file_bytes,
+            )
+            .await
         }
     }
 
@@ -362,9 +395,7 @@ impl TeamsClient {
             format!("{file_size} B")
         };
 
-        let content = format!(
-            r#"<p><a href="{web_url}">{file_name}</a> ({size_str})</p>"#,
-        );
+        let content = format!(r#"<p><a href="{web_url}">{file_name}</a> ({size_str})</p>"#,);
 
         self.send_raw_message(conversation_id, session, "RichText/Html", &content)
             .await
@@ -381,9 +412,8 @@ impl TeamsClient {
         // Upload to /tmz-uploads/<filename> in the user's OneDrive
         let raw_path = format!("tmz-uploads/{file_name}");
         let encoded_path = urlencoding::encode(&raw_path);
-        let upload_url = format!(
-            "https://graph.microsoft.com/v1.0/me/drive/root:/{encoded_path}:/content"
-        );
+        let upload_url =
+            format!("https://graph.microsoft.com/v1.0/me/drive/root:/{encoded_path}:/content");
 
         let response = self
             .http_client
@@ -414,9 +444,8 @@ impl TeamsClient {
             .ok_or_else(|| CoreError::Api("missing item id".to_string()))?;
 
         // Create an organization-wide sharing link
-        let share_url = format!(
-            "https://graph.microsoft.com/v1.0/me/drive/items/{item_id}/createLink"
-        );
+        let share_url =
+            format!("https://graph.microsoft.com/v1.0/me/drive/items/{item_id}/createLink");
         let share_body = serde_json::json!({
             "type": "view",
             "scope": "organization"
@@ -454,7 +483,11 @@ impl TeamsClient {
         ext: &str,
         is_image: bool,
     ) -> Result<String, CoreError> {
-        let obj_type = if is_image { "pish/image" } else { "sharing/file" };
+        let obj_type = if is_image {
+            "pish/image"
+        } else {
+            "sharing/file"
+        };
 
         let mut meta = serde_json::json!({
             "type": obj_type,
@@ -469,7 +502,10 @@ impl TeamsClient {
         let resp = self
             .http_client
             .post("https://api.asm.skype.com/v1/objects")
-            .header("Authorization", format!("skype_token {}", session.skype_token))
+            .header(
+                "Authorization",
+                format!("skype_token {}", session.skype_token),
+            )
             .header("X-Client-Version", "0/0.0.0.0")
             .json(&meta)
             .send()
@@ -479,10 +515,14 @@ impl TeamsClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(CoreError::Api(format!("ASM create failed: {status} - {text}")));
+            return Err(CoreError::Api(format!(
+                "ASM create failed: {status} - {text}"
+            )));
         }
 
-        let obj_data: serde_json::Value = resp.json().await
+        let obj_data: serde_json::Value = resp
+            .json()
+            .await
             .map_err(|e| CoreError::Serialization(format!("parsing ASM response: {e}")))?;
 
         let obj_id = obj_data["id"]
@@ -492,12 +532,16 @@ impl TeamsClient {
 
         // Upload binary content
         let content_path = if is_image { "imgpsh" } else { "original" };
-        let upload_url = format!("https://api.asm.skype.com/v1/objects/{obj_id}/content/{content_path}");
+        let upload_url =
+            format!("https://api.asm.skype.com/v1/objects/{obj_id}/content/{content_path}");
 
         let upload_resp = self
             .http_client
             .put(&upload_url)
-            .header("Authorization", format!("skype_token {}", session.skype_token))
+            .header(
+                "Authorization",
+                format!("skype_token {}", session.skype_token),
+            )
             .header("Content-Type", mime_for_ext(ext))
             .body(file_bytes.to_vec())
             .send()
@@ -534,7 +578,10 @@ impl TeamsClient {
         let response = self
             .http_client
             .post(&url)
-            .header("Authentication", format!("skypetoken={}", session.skype_token))
+            .header(
+                "Authentication",
+                format!("skypetoken={}", session.skype_token),
+            )
             .json(&body)
             .send()
             .await
@@ -585,10 +632,7 @@ impl TeamsClient {
             .await
             .map_err(|e| CoreError::Serialization(format!("parsing response: {e}")))?;
 
-        Ok(data["value"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default())
+        Ok(data["value"].as_array().cloned().unwrap_or_default())
     }
 
     /// List channels in a team via Graph API.
@@ -627,10 +671,7 @@ impl TeamsClient {
             .await
             .map_err(|e| CoreError::Serialization(format!("parsing response: {e}")))?;
 
-        Ok(data["value"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default())
+        Ok(data["value"].as_array().cloned().unwrap_or_default())
     }
 
     /// Get messages from a channel conversation via the native chat API.
@@ -720,9 +761,7 @@ impl TeamsClient {
         if !response.status().is_success() {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
-            return Err(CoreError::Api(format!(
-                "get me failed: {status} - {text}"
-            )));
+            return Err(CoreError::Api(format!("get me failed: {status} - {text}")));
         }
 
         response
@@ -756,9 +795,7 @@ impl TeamsClient {
 
         if !response.status().is_success() {
             let status = response.status();
-            return Err(CoreError::Api(format!(
-                "image download failed: {status}"
-            )));
+            return Err(CoreError::Api(format!("image download failed: {status}")));
         }
 
         response
@@ -806,9 +843,7 @@ fn build_media_generic_file_message(
 ) -> (String, String) {
     let obj_url = format!("https://api.asm.skype.com/v1/objects/{obj_id}");
     let thumb_url = format!("{obj_url}/views/thumbnail");
-    let login_url = format!(
-        "https://login.skype.com/login/sso?go=webclient.xmm&docid={obj_id}"
-    );
+    let login_url = format!("https://login.skype.com/login/sso?go=webclient.xmm&docid={obj_id}");
     let content = format!(
         r#"<URIObject type="File.1" uri="{obj_url}" url_thumbnail="{thumb_url}"><FileSize v="{file_size}"/><OriginalName v="{file_name}"/><a href="{login_url}">{login_url}</a></URIObject>"#,
     );
@@ -864,10 +899,7 @@ fn decode_skype_token(token: &str) -> Result<(String, i64, i64), CoreError> {
     let claims: serde_json::Value = serde_json::from_str(&payload)
         .map_err(|e| CoreError::Auth(format!("parsing skypeToken claims: {e}")))?;
 
-    let skype_id = claims["skypeid"]
-        .as_str()
-        .unwrap_or("unknown")
-        .to_string();
+    let skype_id = claims["skypeid"].as_str().unwrap_or("unknown").to_string();
 
     let iat = claims["iat"].as_i64().unwrap_or(0);
     let exp = claims["exp"].as_i64().unwrap_or(0);

@@ -4,8 +4,8 @@
 //! is unnecessary. They are stored at `$XDG_STATE_HOME/tmz/tokens.json` with
 //! `0600` permissions (owner-only read/write).
 
-use crate::teams::models::TeamsTokens;
 use crate::CoreError;
+use crate::teams::models::TeamsTokens;
 use std::path::PathBuf;
 
 /// Storage for Teams authentication tokens.

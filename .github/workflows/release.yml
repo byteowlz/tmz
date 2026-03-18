@@ -88,6 +88,8 @@ jobs:
           New-Item -ItemType Directory -Path $staging -Force
           Copy-Item "target/${{ matrix.target }}/release/${{ env.BINARY_NAME }}.exe" "$staging/"
           Copy-Item "scripts/teams-auth.mjs" "$staging/"
+          Copy-Item "scripts/package.json" "$staging/"
+          Copy-Item "scripts/setup-auth.ps1" "$staging/"
           7z a "${staging}.zip" "$staging"
 
       - name: Upload artifact

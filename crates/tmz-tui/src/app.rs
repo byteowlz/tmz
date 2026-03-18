@@ -281,11 +281,7 @@ pub fn run(config_path: Option<&PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn handle_key(
-    app: &mut App,
-    key: crossterm::event::KeyEvent,
-    rt: &tokio::runtime::Runtime,
-) {
+fn handle_key(app: &mut App, key: crossterm::event::KeyEvent, rt: &tokio::runtime::Runtime) {
     match app.mode {
         Mode::Normal => handle_normal_key(app, key, rt),
         Mode::Insert => handle_insert_key(app, key, rt),
@@ -294,8 +290,7 @@ fn handle_key(
         Mode::Help => {
             if matches!(
                 key.code,
-                crossterm::event::KeyCode::Esc
-                    | crossterm::event::KeyCode::Char('q' | '?')
+                crossterm::event::KeyCode::Esc | crossterm::event::KeyCode::Char('q' | '?')
             ) {
                 app.mode = Mode::Normal;
             }
@@ -303,11 +298,7 @@ fn handle_key(
     }
 }
 
-fn handle_normal_key(
-    app: &mut App,
-    key: crossterm::event::KeyEvent,
-    rt: &tokio::runtime::Runtime,
-) {
+fn handle_normal_key(app: &mut App, key: crossterm::event::KeyEvent, rt: &tokio::runtime::Runtime) {
     use crossterm::event::{KeyCode, KeyModifiers};
 
     match key.code {
@@ -397,11 +388,7 @@ fn handle_normal_key(
     }
 }
 
-fn handle_insert_key(
-    app: &mut App,
-    key: crossterm::event::KeyEvent,
-    rt: &tokio::runtime::Runtime,
-) {
+fn handle_insert_key(app: &mut App, key: crossterm::event::KeyEvent, rt: &tokio::runtime::Runtime) {
     use crossterm::event::KeyCode;
 
     match key.code {
@@ -480,7 +467,7 @@ fn handle_search_key(app: &mut App, key: crossterm::event::KeyEvent) {
 fn handle_tick(app: &mut App, rt: &tokio::runtime::Runtime) {
     // Auto-sync every 60 seconds
     if let Some(last) = app.last_sync
-        && last.elapsed() > Duration::from_secs(60)
+        && last.elapsed() > Duration::from_mins(1)
         && !app.syncing
     {
         if let Some(ref cache) = app.cache

@@ -80,8 +80,7 @@ impl Cache {
     /// Returns an error if the database cannot be opened or migrations fail.
     pub async fn open(db_path: &Path) -> Result<Self, CoreError> {
         if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(CoreError::Io)?;
+            std::fs::create_dir_all(parent).map_err(CoreError::Io)?;
         }
 
         let db_url = format!("sqlite:{}", db_path.display());
@@ -116,7 +115,7 @@ impl Cache {
                 messages_url TEXT NOT NULL DEFAULT '',
                 member_names TEXT NOT NULL DEFAULT '',
                 raw_json TEXT NOT NULL DEFAULT '{}'
-            )"
+            )",
         )
         .execute(&self.pool)
         .await
@@ -134,7 +133,7 @@ impl Cache {
                 is_from_me INTEGER NOT NULL DEFAULT 0,
                 raw_json TEXT NOT NULL DEFAULT '{}',
                 PRIMARY KEY (id, conversation_id)
-            )"
+            )",
         )
         .execute(&self.pool)
         .await
@@ -146,7 +145,7 @@ impl Cache {
                 content, from_display_name, conversation_id,
                 content=messages,
                 content_rowid=rowid
-            )"
+            )",
         )
         .execute(&self.pool)
         .await
@@ -157,7 +156,7 @@ impl Cache {
             "CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
                 INSERT INTO messages_fts(rowid, content, from_display_name, conversation_id)
                 VALUES (new.rowid, new.content, new.from_display_name, new.conversation_id);
-            END"
+            END",
         )
         .execute(&self.pool)
         .await
@@ -188,7 +187,7 @@ impl Cache {
         // Index for fast conversation lookups
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_messages_conversation
-             ON messages(conversation_id, compose_time DESC)"
+             ON messages(conversation_id, compose_time DESC)",
         )
         .execute(&self.pool)
         .await
@@ -197,7 +196,7 @@ impl Cache {
         // Index for conversation display name search
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_conversations_name
-             ON conversations(display_name COLLATE NOCASE)"
+             ON conversations(display_name COLLATE NOCASE)",
         )
         .execute(&self.pool)
         .await
@@ -210,7 +209,7 @@ impl Cache {
                 data BLOB NOT NULL,
                 content_type TEXT NOT NULL DEFAULT 'image/png',
                 cached_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )"
+            )",
         )
         .execute(&self.pool)
         .await
@@ -239,7 +238,7 @@ impl Cache {
                 last_activity = excluded.last_activity,
                 messages_url = excluded.messages_url,
                 member_names = excluded.member_names,
-                raw_json = excluded.raw_json"
+                raw_json = excluded.raw_json",
         )
         .bind(&conv.id)
         .bind(&conv.display_name)
@@ -275,7 +274,7 @@ impl Cache {
                 message_type = excluded.message_type,
                 compose_time = excluded.compose_time,
                 is_from_me = excluded.is_from_me,
-                raw_json = excluded.raw_json"
+                raw_json = excluded.raw_json",
         )
         .bind(&msg.id)
         .bind(&msg.conversation_id)
@@ -298,14 +297,15 @@ impl Cache {
     /// # Errors
     ///
     /// Returns an error if the database read fails.
-    pub async fn list_conversations(&self, limit: i64) -> Result<Vec<CachedConversation>, CoreError> {
-        let rows = sqlx::query(
-            "SELECT * FROM conversations ORDER BY last_activity DESC LIMIT ?"
-        )
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| CoreError::Other(format!("listing conversations: {e}")))?;
+    pub async fn list_conversations(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<CachedConversation>, CoreError> {
+        let rows = sqlx::query("SELECT * FROM conversations ORDER BY last_activity DESC LIMIT ?")
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| CoreError::Other(format!("listing conversations: {e}")))?;
 
         Ok(rows.iter().map(row_to_conversation).collect())
     }
@@ -315,7 +315,10 @@ impl Cache {
     /// # Errors
     ///
     /// Returns an error if the database read fails.
-    pub async fn find_conversation(&self, query: &str) -> Result<Vec<CachedConversation>, CoreError> {
+    pub async fn find_conversation(
+        &self,
+        query: &str,
+    ) -> Result<Vec<CachedConversation>, CoreError> {
         let pattern = format!("%{query}%");
         let rows = sqlx::query(
             "SELECT * FROM conversations
@@ -323,7 +326,7 @@ impl Cache {
                 OR member_names LIKE ?1 COLLATE NOCASE
                 OR id LIKE ?1 COLLATE NOCASE
              ORDER BY last_activity DESC
-             LIMIT 10"
+             LIMIT 10",
         )
         .bind(&pattern)
         .fetch_all(&self.pool)
@@ -347,7 +350,7 @@ impl Cache {
             "SELECT * FROM messages
              WHERE conversation_id = ?
              ORDER BY compose_time DESC
-             LIMIT ?"
+             LIMIT ?",
         )
         .bind(conversation_id)
         .bind(limit)
@@ -398,7 +401,7 @@ impl Cache {
              LEFT JOIN conversations c ON c.id = m.conversation_id
              WHERE messages_fts MATCH ?
              ORDER BY m.compose_time DESC
-             LIMIT ?"
+             LIMIT ?",
         )
         .bind(query)
         .bind(limit)
@@ -492,12 +495,11 @@ impl Cache {
     ///
     /// Returns an error if the database read fails.
     pub async fn get_image(&self, url: &str) -> Result<Option<Vec<u8>>, CoreError> {
-        let row: Option<(Vec<u8>,)> =
-            sqlx::query_as("SELECT data FROM images WHERE url = ?")
-                .bind(url)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|e| CoreError::Other(format!("getting cached image: {e}")))?;
+        let row: Option<(Vec<u8>,)> = sqlx::query_as("SELECT data FROM images WHERE url = ?")
+            .bind(url)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| CoreError::Other(format!("getting cached image: {e}")))?;
 
         Ok(row.map(|(data,)| data))
     }
@@ -508,12 +510,11 @@ impl Cache {
     ///
     /// Returns an error if the database read fails.
     pub async fn has_image(&self, url: &str) -> Result<bool, CoreError> {
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM images WHERE url = ?")
-                .bind(url)
-                .fetch_one(&self.pool)
-                .await
-                .map_err(|e| CoreError::Other(format!("checking image cache: {e}")))?;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM images WHERE url = ?")
+            .bind(url)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| CoreError::Other(format!("checking image cache: {e}")))?;
 
         Ok(count > 0)
     }
@@ -525,13 +526,11 @@ impl Cache {
     ///
     /// Returns an error if the database write fails.
     pub async fn prune_images(&self, older_than_days: u32) -> Result<u64, CoreError> {
-        let result = sqlx::query(
-            "DELETE FROM images WHERE cached_at < datetime('now', ?)",
-        )
-        .bind(format!("-{older_than_days} days"))
-        .execute(&self.pool)
-        .await
-        .map_err(|e| CoreError::Other(format!("pruning images: {e}")))?;
+        let result = sqlx::query("DELETE FROM images WHERE cached_at < datetime('now', ?)")
+            .bind(format!("-{older_than_days} days"))
+            .execute(&self.pool)
+            .await
+            .map_err(|e| CoreError::Other(format!("pruning images: {e}")))?;
 
         Ok(result.rows_affected())
     }
@@ -557,10 +556,11 @@ impl Cache {
             .await
             .unwrap_or(0);
 
-        let img_bytes: i64 = sqlx::query_scalar("SELECT COALESCE(SUM(LENGTH(data)), 0) FROM images")
-            .fetch_one(&self.pool)
-            .await
-            .unwrap_or(0);
+        let img_bytes: i64 =
+            sqlx::query_scalar("SELECT COALESCE(SUM(LENGTH(data)), 0) FROM images")
+                .fetch_one(&self.pool)
+                .await
+                .unwrap_or(0);
 
         Ok(CacheStats {
             conversations: conv_count,
@@ -641,7 +641,11 @@ pub fn strip_html(html: &str) -> String {
     // Remove blockquote sections entirely (quoted reply context)
     while let Some(start) = s.find("<blockquote") {
         if let Some(end) = s[start..].find("</blockquote>") {
-            s = format!("{}{}", &s[..start], &s[start + end + "</blockquote>".len()..]);
+            s = format!(
+                "{}{}",
+                &s[..start],
+                &s[start + end + "</blockquote>".len()..]
+            );
         } else {
             break;
         }
@@ -792,8 +796,7 @@ pub fn parse_conversation(conv: &serde_json::Value) -> CachedConversation {
     let last_activity = lm["composetime"].as_str().unwrap_or("").to_string();
     let messages_url = conv["messages"].as_str().unwrap_or("").to_string();
 
-    let raw_json =
-        serde_json::to_string(conv).unwrap_or_default();
+    let raw_json = serde_json::to_string(conv).unwrap_or_default();
 
     CachedConversation {
         id,

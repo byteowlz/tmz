@@ -18,25 +18,27 @@ pub enum Event {
 pub fn spawn_event_reader(tick_rate: Duration) -> mpsc::Receiver<Event> {
     let (tx, rx) = mpsc::channel();
 
-    std::thread::spawn(move || loop {
-        if event::poll(tick_rate).unwrap_or(false) {
-            match event::read() {
-                Ok(CEvent::Key(key)) => {
-                    if tx.send(Event::Key(key)).is_err() {
-                        return;
+    std::thread::spawn(move || {
+        loop {
+            if event::poll(tick_rate).unwrap_or(false) {
+                match event::read() {
+                    Ok(CEvent::Key(key)) => {
+                        if tx.send(Event::Key(key)).is_err() {
+                            return;
+                        }
                     }
-                }
-                Ok(CEvent::Resize(_, _)) => {
-                    if tx.send(Event::Resize).is_err() {
-                        return;
+                    Ok(CEvent::Resize(_, _)) => {
+                        if tx.send(Event::Resize).is_err() {
+                            return;
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
-        }
-        // Always send a tick so the UI can update background state
-        if tx.send(Event::Tick).is_err() {
-            return;
+            // Always send a tick so the UI can update background state
+            if tx.send(Event::Tick).is_err() {
+                return;
+            }
         }
     });
 

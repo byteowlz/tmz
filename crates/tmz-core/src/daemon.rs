@@ -8,19 +8,19 @@
 //! - `$XDG_STATE_HOME/tmz/tmz.pid` - daemon PID
 //! - `$XDG_STATE_HOME/tmz/tmz.log` - daemon log output
 
-use crate::cache::{parse_conversation, parse_message, Cache};
+use crate::CoreError;
+use crate::cache::{Cache, parse_conversation, parse_message};
 use crate::teams::auth::AuthManager;
 use crate::teams::client::TeamsClient;
-use crate::CoreError;
 use std::path::PathBuf;
 use std::time::Duration;
 
 /// Default interval between token refreshes (50 minutes).
 /// Tokens typically expire after 60 minutes, so this provides a 10-minute buffer.
-const TOKEN_REFRESH_INTERVAL: Duration = Duration::from_secs(50 * 60);
+const TOKEN_REFRESH_INTERVAL: Duration = Duration::from_mins(50);
 
 /// Default interval between sync runs (5 minutes).
-const SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const SYNC_INTERVAL: Duration = Duration::from_mins(5);
 
 /// Number of top conversations to sync messages for.
 const SYNC_TOP_CHATS: i64 = 30;

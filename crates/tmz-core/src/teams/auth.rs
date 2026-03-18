@@ -9,9 +9,9 @@
 //! browser profile. Subsequent token refreshes run headlessly - no user
 //! interaction required until the SSO session itself expires.
 
+use crate::CoreError;
 use crate::teams::models::TeamsTokens;
 use crate::teams::storage::TokenStorage;
-use crate::CoreError;
 use serde::Deserialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
@@ -111,48 +111,78 @@ impl AuthManager {
             cmd.arg("--headless");
         }
 
-        // stdout = token JSON, stderr = progress/log messages
+        // stdout = token JSON, stderr = progress/log messages.
+        // Always capture stderr so we can detect Playwright import errors
+        // and show actionable hints. In interactive mode, captured stderr
+        // is printed after the process completes.
         cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(if headless {
-            std::process::Stdio::null()
-        } else {
-            std::process::Stdio::inherit()
-        });
+        cmd.stderr(std::process::Stdio::piped());
 
-        log::debug!("running auth script: {} (headless={headless})", script_path.display());
+        log::debug!(
+            "running auth script: {} (headless={headless})",
+            script_path.display()
+        );
 
         let output = cmd.output().await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 AuthenticationError::TokenExtractionError(
-                    "node not found - install Node.js to use browser login".to_string(),
+                    "node not found - install Node.js to use browser login.\n\
+                     Install Node.js from https://nodejs.org/ and ensure it is in your PATH."
+                        .to_string(),
                 )
             } else {
-                AuthenticationError::TokenExtractionError(format!(
-                    "failed to run auth script: {e}"
-                ))
+                AuthenticationError::TokenExtractionError(format!("failed to run auth script: {e}"))
             }
         })?;
 
+        // Print captured stderr in interactive mode so progress is visible
+        if !headless {
+            let stderr_bytes = &output.stderr;
+            if !stderr_bytes.is_empty() {
+                let _ = std::io::Write::write_all(&mut std::io::stderr(), stderr_bytes);
+            }
+        }
+
         if !output.status.success() {
-            return Err(AuthenticationError::TokenExtractionError(
-                if headless {
-                    "headless token refresh failed - SSO session may have expired. Run 'tmz auth login' to re-authenticate.".to_string()
-                } else {
-                    "browser login failed or timed out - check stderr for details".to_string()
-                },
-            ));
+            let stderr_text = String::from_utf8_lossy(&output.stderr);
+
+            // Detect Playwright not installed (ESM import failure)
+            if stderr_text.contains("Cannot find package 'playwright'")
+                || stderr_text.contains("ERR_MODULE_NOT_FOUND")
+                || stderr_text.contains("Cannot find module")
+            {
+                let script_dir = script_path.parent().map_or_else(
+                    || "the script directory".to_string(),
+                    |p| p.display().to_string(),
+                );
+                return Err(AuthenticationError::TokenExtractionError(format!(
+                    "Playwright is not installed. The auth script uses ES modules, \
+                     so Playwright must be installed locally (not globally).\n\
+                     Fix: cd \"{script_dir}\" && npm install && npx playwright install chromium"
+                )));
+            }
+
+            return Err(AuthenticationError::TokenExtractionError(if headless {
+                "headless token refresh failed - SSO session may have expired. Run 'tmz auth login' to re-authenticate.".to_string()
+            } else {
+                format!(
+                    "browser login failed or timed out.\n{}",
+                    if stderr_text.is_empty() {
+                        "No additional error details available.".to_string()
+                    } else {
+                        stderr_text.into_owned()
+                    }
+                )
+            }));
         }
 
         let stdout = String::from_utf8(output.stdout).map_err(|e| {
             AuthenticationError::TokenExtractionError(format!("invalid UTF-8 output: {e}"))
         })?;
 
-        let output: serde_json::Value =
-            serde_json::from_str(&stdout).map_err(|e| {
-                AuthenticationError::TokenExtractionError(format!(
-                    "parsing token output: {e}"
-                ))
-            })?;
+        let output: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| {
+            AuthenticationError::TokenExtractionError(format!("parsing token output: {e}"))
+        })?;
 
         // New format: { "skype_token": "...", "chat_token": "...", ... }
         if output.get("skype_token").is_some() {
@@ -162,9 +192,7 @@ impl AuthManager {
         // Legacy format: raw localStorage HashMap
         let local_storage: std::collections::HashMap<String, String> =
             serde_json::from_value(output).map_err(|e| {
-                AuthenticationError::TokenExtractionError(format!(
-                    "parsing token output: {e}"
-                ))
+                AuthenticationError::TokenExtractionError(format!("parsing token output: {e}"))
             })?;
         self.store_tokens_from_browser(&local_storage)
     }
@@ -179,7 +207,8 @@ impl AuthManager {
     /// Returns an error if headless refresh fails (SSO session expired).
     pub async fn refresh_tokens(&self) -> Result<TeamsTokens, AuthenticationError> {
         log::debug!("attempting headless token refresh");
-        self.browser_login(Some(HEADLESS_TIMEOUT_SECS), true, false).await
+        self.browser_login(Some(HEADLESS_TIMEOUT_SECS), true, false)
+            .await
     }
 
     /// Get valid tokens, auto-refreshing if expired or about to expire.
@@ -206,21 +235,23 @@ impl AuthManager {
                     Err(_) => {
                         // If tokens haven't fully expired yet, use them anyway
                         if tokens.expires_at > now {
-                            log::warn!("headless refresh failed but tokens still valid for {}s", tokens.expires_at - now);
+                            log::warn!(
+                                "headless refresh failed but tokens still valid for {}s",
+                                tokens.expires_at - now
+                            );
                             Ok(tokens)
                         } else {
                             Err(AuthenticationError::TokenExtractionError(
-                                "tokens expired and headless refresh failed. Run 'tmz auth login'.".to_string(),
+                                "tokens expired and headless refresh failed. Run 'tmz auth login'."
+                                    .to_string(),
                             ))
                         }
                     }
                 }
             }
-            Err(CoreError::SecretNotFound(_)) => {
-                Err(AuthenticationError::TokenExtractionError(
-                    "not authenticated. Run 'tmz auth login' first.".to_string(),
-                ))
-            }
+            Err(CoreError::SecretNotFound(_)) => Err(AuthenticationError::TokenExtractionError(
+                "not authenticated. Run 'tmz auth login' first.".to_string(),
+            )),
             Err(e) => Err(AuthenticationError::StorageError(e)),
         }
     }
@@ -256,12 +287,9 @@ impl AuthManager {
         output: &serde_json::Value,
     ) -> Result<TeamsTokens, AuthenticationError> {
         let get = |field: &str| -> Result<String, AuthenticationError> {
-            output[field]
-                .as_str()
-                .map(String::from)
-                .ok_or_else(|| {
-                    AuthenticationError::TokenExtractionError(format!("missing {field} in output"))
-                })
+            output[field].as_str().map(String::from).ok_or_else(|| {
+                AuthenticationError::TokenExtractionError(format!("missing {field} in output"))
+            })
         };
 
         let skype_token = get("skype_token")?;
@@ -300,14 +328,19 @@ impl AuthManager {
         let graph_token_json = Self::find_token(local_storage, "graph.microsoft.com")?;
         let presence_token_json = Self::find_token(local_storage, "presence.teams.microsoft.com")?;
 
-        let skype_token: MsalToken = serde_json::from_str(&skype_token_json)
-            .map_err(|e| AuthenticationError::TokenExtractionError(format!("parsing skype token: {e}")))?;
-        let chat_token: MsalToken = serde_json::from_str(&chat_token_json)
-            .map_err(|e| AuthenticationError::TokenExtractionError(format!("parsing chat token: {e}")))?;
-        let graph_token: MsalToken = serde_json::from_str(&graph_token_json)
-            .map_err(|e| AuthenticationError::TokenExtractionError(format!("parsing graph token: {e}")))?;
-        let presence_token: MsalToken = serde_json::from_str(&presence_token_json)
-            .map_err(|e| AuthenticationError::TokenExtractionError(format!("parsing presence token: {e}")))?;
+        let skype_token: MsalToken = serde_json::from_str(&skype_token_json).map_err(|e| {
+            AuthenticationError::TokenExtractionError(format!("parsing skype token: {e}"))
+        })?;
+        let chat_token: MsalToken = serde_json::from_str(&chat_token_json).map_err(|e| {
+            AuthenticationError::TokenExtractionError(format!("parsing chat token: {e}"))
+        })?;
+        let graph_token: MsalToken = serde_json::from_str(&graph_token_json).map_err(|e| {
+            AuthenticationError::TokenExtractionError(format!("parsing graph token: {e}"))
+        })?;
+        let presence_token: MsalToken =
+            serde_json::from_str(&presence_token_json).map_err(|e| {
+                AuthenticationError::TokenExtractionError(format!("parsing presence token: {e}"))
+            })?;
 
         let (tenant_id, user_id, upn, expires_at) = parse_token_claims(&skype_token.secret)?;
 
@@ -432,7 +465,9 @@ fn parse_token_claims(token: &str) -> Result<(String, String, String, i64), Auth
 /// Search order:
 /// 1. `$TMZ_AUTH_SCRIPT` environment variable
 /// 2. `$XDG_DATA_HOME/tmz/teams-auth.mjs` (installed by `just install-all`)
-/// 3. Next to the binary in workspace `scripts/` directory (development)
+/// 3. Same directory as the `tmz` binary (Windows zip layout)
+/// 4. System install (`/usr/share/tmz/`, e.g. AUR)
+/// 5. Development: walk up from binary to find `scripts/` directory
 fn find_auth_script() -> Result<std::path::PathBuf, AuthenticationError> {
     const SCRIPT_NAME: &str = "teams-auth.mjs";
 
@@ -452,13 +487,23 @@ fn find_auth_script() -> Result<std::path::PathBuf, AuthenticationError> {
         }
     }
 
-    // 3. System install (e.g. AUR: /usr/share/tmz/)
+    // 3. Same directory as the binary (Windows zip / portable layout)
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(bin_dir) = exe.parent()
+    {
+        let candidate = bin_dir.join(SCRIPT_NAME);
+        if candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    // 4. System install (e.g. AUR: /usr/share/tmz/)
     let system_path = std::path::Path::new("/usr/share/tmz").join(SCRIPT_NAME);
     if system_path.exists() {
         return Ok(system_path);
     }
 
-    // 4. Development: walk up from binary to find scripts/ directory
+    // 5. Development: walk up from binary to find scripts/ directory
     if let Ok(exe) = std::env::current_exe()
         && let Some(bin_dir) = exe.parent()
     {
@@ -471,8 +516,7 @@ fn find_auth_script() -> Result<std::path::PathBuf, AuthenticationError> {
     }
 
     Err(AuthenticationError::TokenExtractionError(
-        "teams-auth.mjs not found. Run 'just install-all' or set TMZ_AUTH_SCRIPT."
-            .to_string(),
+        "teams-auth.mjs not found. Run 'just install-all' or set TMZ_AUTH_SCRIPT.".to_string(),
     ))
 }
 

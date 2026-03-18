@@ -45,6 +45,5 @@ pub fn env_prefix() -> String {
 /// Returns the default parallelism based on available CPU cores.
 #[must_use]
 pub fn default_parallelism() -> usize {
-    std::thread::available_parallelism()
-        .map_or(1, std::num::NonZero::get)
+    std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
 }

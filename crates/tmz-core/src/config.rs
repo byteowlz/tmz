@@ -9,7 +9,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::paths::{expand_str_path, write_default_config};
-use crate::{default_parallelism, env_prefix, AppPaths};
+use crate::{AppPaths, default_parallelism, env_prefix};
 
 /// Main application configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -40,7 +40,9 @@ pub struct AppConfig {
     /// People aliases for quick chat access.
     /// Maps short names to display names, email addresses, or conversation IDs.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    #[schemars(description = "People/chat aliases. Map short names to display names or conversation IDs.")]
+    #[schemars(
+        description = "People/chat aliases. Map short names to display names or conversation IDs."
+    )]
     pub people: HashMap<String, String>,
 }
 

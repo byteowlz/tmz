@@ -118,7 +118,7 @@ fn draw_chat_list(f: &mut Frame<'_>, app: &App, area: Rect) {
         .constraints([
             Constraint::Length(1), // tabs
             Constraint::Length(1), // search
-            Constraint::Min(0),   // list
+            Constraint::Min(0),    // list
         ])
         .split(inner);
 
@@ -135,10 +135,7 @@ fn draw_chat_list(f: &mut Frame<'_>, app: &App, area: Rect) {
     } else {
         format!(" /{}", app.chat_search)
     };
-    f.render_widget(
-        Paragraph::new(search_text).style(search_style),
-        chunks[1],
-    );
+    f.render_widget(Paragraph::new(search_text).style(search_style), chunks[1]);
 
     // Conversation list
     let max_name_len = (area.width as usize).saturating_sub(6); // border + padding + bar + space
@@ -264,8 +261,7 @@ fn draw_messages(f: &mut Frame<'_>, app: &App, area: Rect) {
     if total_lines > visible {
         let mut scrollbar_state = ScrollbarState::new(total_lines).position(scroll);
         f.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .style(Style::default().fg(DIM)),
+            Scrollbar::new(ScrollbarOrientation::VerticalRight).style(Style::default().fg(DIM)),
             inner,
             &mut scrollbar_state,
         );
@@ -353,11 +349,9 @@ fn draw_input(f: &mut Frame<'_>, app: &App, area: Rect) {
     f.render_widget(block, area);
 
     let display = if app.input.is_empty() && !is_focused {
-        Paragraph::new("  Type a message... (i)")
-            .style(Style::default().fg(DIM))
+        Paragraph::new("  Type a message... (i)").style(Style::default().fg(DIM))
     } else {
-        Paragraph::new(format!("  {}", app.input))
-            .style(Style::default().fg(Color::White))
+        Paragraph::new(format!("  {}", app.input)).style(Style::default().fg(Color::White))
     };
 
     f.render_widget(display, inner);
@@ -390,8 +384,7 @@ fn draw_files(f: &mut Frame<'_>, app: &App, area: Rect) {
     f.render_widget(block, area);
 
     // TODO: populate from chat metadata / search for file messages
-    let placeholder = Paragraph::new("  No files")
-        .style(Style::default().fg(DIM));
+    let placeholder = Paragraph::new("  No files").style(Style::default().fg(DIM));
     f.render_widget(placeholder, inner);
 }
 
@@ -428,14 +421,12 @@ fn draw_status_bar(f: &mut Frame<'_>, app: &App, area: Rect) {
     };
 
     let token_span = match app.token_expires_mins {
-        Some(mins) if mins > 10 => Span::styled(
-            format!(" {mins}m "),
-            Style::default().fg(Color::Green),
-        ),
-        Some(mins) if mins > 0 => Span::styled(
-            format!(" {mins}m "),
-            Style::default().fg(Color::Yellow),
-        ),
+        Some(mins) if mins > 10 => {
+            Span::styled(format!(" {mins}m "), Style::default().fg(Color::Green))
+        }
+        Some(mins) if mins > 0 => {
+            Span::styled(format!(" {mins}m "), Style::default().fg(Color::Yellow))
+        }
         Some(_) => Span::styled(" expired ", Style::default().fg(Color::Red)),
         None => Span::styled(" no auth ", Style::default().fg(Color::Red)),
     };
@@ -447,19 +438,13 @@ fn draw_status_bar(f: &mut Frame<'_>, app: &App, area: Rect) {
         if ago < 60 {
             Span::styled(" synced ", Style::default().fg(Color::Green))
         } else {
-            Span::styled(
-                format!(" {}m ago ", ago / 60),
-                Style::default().fg(DIM),
-            )
+            Span::styled(format!(" {}m ago ", ago / 60), Style::default().fg(DIM))
         }
     } else {
         Span::styled(" not synced ", Style::default().fg(DIM))
     };
 
-    let status = Span::styled(
-        format!(" {} ", app.status_msg),
-        Style::default().fg(DIM),
-    );
+    let status = Span::styled(format!(" {} ", app.status_msg), Style::default().fg(DIM));
 
     let profile = Span::styled(
         format!(" [{}] ", app.config.profile),
@@ -484,10 +469,7 @@ fn draw_status_bar(f: &mut Frame<'_>, app: &App, area: Rect) {
         keys_hint,
     ]);
 
-    f.render_widget(
-        Paragraph::new(line).alignment(Alignment::Left),
-        area,
-    );
+    f.render_widget(Paragraph::new(line).alignment(Alignment::Left), area);
 }
 
 // ─── Help overlay ────────────────────────────────────────────────────
@@ -577,8 +559,10 @@ fn extract_time(compose_time: &str) -> String {
 
 fn format_date(date_str: &str) -> String {
     // "2026-02-18" -> "February 18, 2026"
-    chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
-        .map_or_else(|_| date_str.to_string(), |d| d.format("%B %d, %Y").to_string())
+    chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").map_or_else(
+        |_| date_str.to_string(),
+        |d| d.format("%B %d, %Y").to_string(),
+    )
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {

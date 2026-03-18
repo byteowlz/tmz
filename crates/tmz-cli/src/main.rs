@@ -50,7 +50,9 @@ fn try_main() -> Result<()> {
             limit,
             no_images,
             sync,
-        } => rt.block_on(handle_msg(&ctx, target, message, file, limit, no_images, sync)),
+        } => rt.block_on(handle_msg(
+            &ctx, target, message, file, limit, no_images, sync,
+        )),
         Command::Tldr { chats, per_chat } => rt.block_on(handle_tldr(&ctx, chats, per_chat)),
         Command::Search { query, chat, limit } => {
             rt.block_on(handle_search(&ctx, &query, chat.as_deref(), limit))
@@ -152,7 +154,8 @@ enum ConvTypeFilter {
 }
 
 impl ConvTypeFilter {
-    /// Check if a conversation matches this filter based on its product type.
+    /// Check if a conversation matches this filter based on its product type,
+    /// falling back to ID-format heuristics when `product_type` is empty.
     ///
     /// Known product types from Teams API:
     /// - `OneToOneChat` - 1:1 direct messages
@@ -162,11 +165,22 @@ impl ConvTypeFilter {
     /// - `TeamsTeam` - team container (usually not a chat target)
     /// - `SfbInteropChat` - Skype for Business interop
     /// - `Stream*` - notification/activity streams (not chats)
-    fn matches(self, product_type: &str) -> bool {
+    ///
+    /// ID-format heuristics (used when `product_type` is empty):
+    /// - `19:<uuid>_<uuid>@unq.gbl.spaces` - 1:1 direct message
+    /// - `19:<hash>@thread.v2` - group chat
+    /// - `19:<hash>@thread.tacv2` - Teams channel
+    fn matches(self, product_type: &str, conv_id: &str) -> bool {
+        if !product_type.is_empty() {
+            return self.matches_product_type(product_type);
+        }
+        // Fallback: infer type from conversation ID format
+        self.matches_id_format(conv_id)
+    }
+
+    fn matches_product_type(self, product_type: &str) -> bool {
         match self {
-            Self::OneToOne => {
-                product_type == "OneToOneChat" || product_type == "SfbInteropChat"
-            }
+            Self::OneToOne => product_type == "OneToOneChat" || product_type == "SfbInteropChat",
             Self::Group => product_type == "Chat",
             Self::Channel => {
                 product_type == "TeamsStandardChannel"
@@ -174,6 +188,15 @@ impl ConvTypeFilter {
                     || product_type == "TeamsTeam"
             }
             Self::Meeting => product_type == "Meeting",
+        }
+    }
+
+    fn matches_id_format(self, conv_id: &str) -> bool {
+        match self {
+            Self::OneToOne => conv_id.contains("@unq.gbl.spaces"),
+            Self::Group => conv_id.ends_with("@thread.v2") && !conv_id.contains("@unq.gbl.spaces"),
+            Self::Channel => conv_id.ends_with("@thread.tacv2"),
+            Self::Meeting => false, // no reliable ID-format heuristic for meetings
         }
     }
 }
@@ -491,12 +514,16 @@ impl RuntimeContext {
                 return Ok(matches[0].id.clone());
             }
             if matches.is_empty() {
-                return Err(anyhow!("alias '{target}' resolved to '{resolved}' but no matching conversation found in cache. Run 'tmz sync' first."));
+                return Err(anyhow!(
+                    "alias '{target}' resolved to '{resolved}' but no matching conversation found in cache. Run 'tmz sync' first."
+                ));
             }
             // Multiple matches - show them
             eprintln!("Alias '{target}' matched multiple conversations:");
             print_conversation_list(&matches);
-            return Err(anyhow!("ambiguous alias. Use 'tmz alias {target} <exact-id>' to set a specific conversation."));
+            return Err(anyhow!(
+                "ambiguous alias. Use 'tmz alias {target} <exact-id>' to set a specific conversation."
+            ));
         }
 
         // 2. Exact conversation ID
@@ -507,12 +534,16 @@ impl RuntimeContext {
         // 3. Fuzzy search
         let matches = cache.find_conversation(target).await?;
         match matches.len() {
-            0 => Err(anyhow!("no conversation matching '{target}'. Run 'tmz sync' or use 'tmz find {target}'.")),
+            0 => Err(anyhow!(
+                "no conversation matching '{target}'. Run 'tmz sync' or use 'tmz find {target}'."
+            )),
             1 => Ok(matches[0].id.clone()),
             _ => {
                 eprintln!("Multiple conversations match '{target}':");
                 print_conversation_list(&matches);
-                Err(anyhow!("ambiguous target. Use the full conversation ID or create an alias with 'tmz alias'."))
+                Err(anyhow!(
+                    "ambiguous target. Use the full conversation ID or create an alias with 'tmz alias'."
+                ))
             }
         }
     }
@@ -560,7 +591,9 @@ async fn handle_auth(_ctx: &RuntimeContext, cmd: AuthSubcommand) -> Result<()> {
                 let _ = open::that_detached(AuthManager::TEAMS_URL);
                 println!();
                 println!("After login, extract tokens and run:");
-                println!("  tmz auth store --skype-token <token> --chat-token <token> --graph-token <token> --presence-token <token>");
+                println!(
+                    "  tmz auth store --skype-token <token> --chat-token <token> --graph-token <token> --presence-token <token>"
+                );
                 return Ok(());
             }
 
@@ -599,11 +632,11 @@ async fn handle_sync(ctx: &RuntimeContext, cmd: SyncCommand) -> Result<()> {
     let db = ctx.open_cache().await?;
 
     // Get current user info for proper message attribution
-    let my_name: Option<String> = client
-        .get_me()
-        .await
-        .ok()
-        .and_then(|u| u["displayName"].as_str().map(std::string::ToString::to_string));
+    let my_name: Option<String> = client.get_me().await.ok().and_then(|u| {
+        u["displayName"]
+            .as_str()
+            .map(std::string::ToString::to_string)
+    });
 
     // 1. Sync conversations
     eprint!("Syncing conversations... ");
@@ -640,14 +673,13 @@ async fn handle_sync(ctx: &RuntimeContext, cmd: SyncCommand) -> Result<()> {
             let short_name: String = name.chars().take(40).collect();
             eprint!("\rSyncing messages [{}/{}] {short_name:<40}", i + 1, total);
 
-            match client
-                .get_chat_messages(&conv.id, Some(cmd.per_chat))
-                .await
-            {
+            match client.get_chat_messages(&conv.id, Some(cmd.per_chat)).await {
                 Ok(msg_data) => {
                     if let Some(messages) = msg_data["messages"].as_array() {
                         for msg in messages {
-                            if let Some(cached) = cache::parse_message(msg, &conv.id, my_name.as_deref()) {
+                            if let Some(cached) =
+                                cache::parse_message(msg, &conv.id, my_name.as_deref())
+                            {
                                 // Extract image URLs for caching
                                 let urls =
                                     tmz_core::kitty::extract_image_urls(&cached.content_html);
@@ -667,7 +699,10 @@ async fn handle_sync(ctx: &RuntimeContext, cmd: SyncCommand) -> Result<()> {
                 }
             }
         }
-        eprintln!("\r{msg_count} messages across {total} conversations.{:>40}", "");
+        eprintln!(
+            "\r{msg_count} messages across {total} conversations.{:>40}",
+            ""
+        );
 
         // Download uncached images
         if !image_urls.is_empty() {
@@ -732,13 +767,18 @@ async fn handle_chats(ctx: &RuntimeContext, cmd: ChatsCommand) -> Result<()> {
 /// Sync messages for a specific conversation.
 async fn sync_conversation(db: &tmz_core::Cache, conv_id: &str, limit: i64) -> Result<u64> {
     let client = TeamsClient::new()?;
-    let me = client.get_me().await.map_err(|e| anyhow!("get user info: {e}"))?;
+    let me = client
+        .get_me()
+        .await
+        .map_err(|e| anyhow!("get user info: {e}"))?;
     let my_name = me["displayName"].as_str();
     let limit_i32 = i32::try_from(limit).unwrap_or(50);
-    
-    let data = client.get_chat_messages(conv_id, Some(limit_i32)).await
+
+    let data = client
+        .get_chat_messages(conv_id, Some(limit_i32))
+        .await
         .map_err(|e| anyhow!("fetch messages: {e}"))?;
-    
+
     let mut count = 0u64;
     if let Some(msgs) = data["messages"].as_array() {
         for msg in msgs {
@@ -816,8 +856,11 @@ async fn handle_msg(
             return Ok(());
         }
         if let Some(msgs) = data["messages"].as_array() {
-            let my_name = client.get_me().await.ok()
-                .and_then(|u| u["displayName"].as_str().map(std::string::ToString::to_string));
+            let my_name = client.get_me().await.ok().and_then(|u| {
+                u["displayName"]
+                    .as_str()
+                    .map(std::string::ToString::to_string)
+            });
             msgs.iter()
                 .filter_map(|m| cache::parse_message(m, &conv_id, my_name.as_deref()))
                 .collect()
@@ -936,9 +979,7 @@ async fn handle_tldr(ctx: &RuntimeContext, num_chats: i64, per_chat: i64) -> Res
             "Meeting" => "meeting",
             other => other,
         };
-        println!(
-            "\x1b[1m{name}\x1b[0m  \x1b[2m[{conv_type}]\x1b[0m"
-        );
+        println!("\x1b[1m{name}\x1b[0m  \x1b[2m[{conv_type}]\x1b[0m");
 
         let groups = group_messages(messages);
         let mut prev: Option<&MessageGroup<'_>> = None;
@@ -1034,11 +1075,7 @@ async fn handle_search(
         };
 
         let bar_color = if r.message.is_from_me { "36" } else { "33" };
-        let name_color = if r.message.is_from_me {
-            "1;36"
-        } else {
-            "1;33"
-        };
+        let name_color = if r.message.is_from_me { "1;36" } else { "1;33" };
 
         // Header line
         let name_vis = visible_len(name) + visible_len(&conv);
@@ -1082,7 +1119,7 @@ async fn handle_find(
     let matches: Vec<_> = if let Some(filter) = conv_type {
         all_matches
             .into_iter()
-            .filter(|c| filter.matches(&c.product_type))
+            .filter(|c| filter.matches(&c.product_type, &c.id))
             .collect()
     } else {
         all_matches
@@ -1112,7 +1149,7 @@ async fn handle_find(
 
     println!("{} conversation(s) matching '{query}':\n", matches.len());
     for c in &matches {
-        let kind = format_chat_type(&c.product_type);
+        let kind = format_chat_type(&c.product_type, &c.id);
         let time = format_time(&c.last_activity);
         println!("  {kind:>9}  {}", c.display_name);
         println!("           {time}");
@@ -1143,7 +1180,7 @@ async fn handle_alias(
             let matches: Vec<_> = if let Some(filter) = conv_type {
                 all_matches
                     .into_iter()
-                    .filter(|c| filter.matches(&c.product_type))
+                    .filter(|c| filter.matches(&c.product_type, &c.id))
                     .collect()
             } else {
                 all_matches
@@ -1325,8 +1362,7 @@ fn service_enable() -> Result<()> {
     let exe =
         std::env::current_exe().map_err(|e| anyhow!("cannot determine executable path: {e}"))?;
     let exe_str = exe.to_string_lossy();
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
 
     if cfg!(target_os = "macos") {
         let plist_dir = home.join("Library/LaunchAgents");
@@ -1367,8 +1403,7 @@ fn service_enable() -> Result<()> {
 }
 
 fn service_disable() -> Result<()> {
-    let home =
-        dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))?;
 
     if cfg!(target_os = "macos") {
         let plist_path = home.join("Library/LaunchAgents/de.byteowlz.tmz.plist");
@@ -1425,7 +1460,11 @@ async fn handle_cache(ctx: &RuntimeContext, command: CacheCommand) -> Result<()>
             } else {
                 println!("Conversations: {}", stats.conversations);
                 println!("Messages:      {}", stats.messages);
-                println!("Images:        {} ({})", stats.images, format_bytes(stats.image_bytes));
+                println!(
+                    "Images:        {} ({})",
+                    stats.images,
+                    format_bytes(stats.image_bytes)
+                );
             }
         }
         CacheCommand::Prune { days } => {
@@ -1507,7 +1546,7 @@ fn handle_completions(shell: Shell) {
 
 fn print_conversation_list(convs: &[tmz_core::CachedConversation]) {
     for c in convs {
-        let kind = format_chat_type(&c.product_type);
+        let kind = format_chat_type(&c.product_type, &c.id);
         let time = format_time(&c.last_activity);
         let name = if c.display_name.is_empty() {
             "(unnamed)"
@@ -1575,8 +1614,7 @@ fn group_messages(messages: &[tmz_core::CachedMessage]) -> Vec<MessageGroup<'_>>
 
     for msg in messages {
         let same_sender = groups.last().is_some_and(|g| {
-            g.sender == msg.from_display_name
-                && g.first_date() == extract_date(&msg.compose_time)
+            g.sender == msg.from_display_name && g.first_date() == extract_date(&msg.compose_time)
         });
 
         if same_sender {
@@ -1829,8 +1867,7 @@ fn wrap_lines(lines: &[String], max_width: usize) -> Vec<String> {
                         let mut chunk = String::new();
                         let mut clen = 0;
                         for ch in chars {
-                            let ch_w =
-                                unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                            let ch_w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
                             if clen + ch_w > max_width && !chunk.is_empty() {
                                 result.push(chunk);
                                 chunk = String::new();
@@ -1959,13 +1996,28 @@ fn parse_month_day(date: &str) -> Option<String> {
     Some(format!("{month} {day:>2}"))
 }
 
-fn format_chat_type(product_type: &str) -> &str {
+fn format_chat_type(product_type: &str, conv_id: &str) -> &'static str {
     match product_type {
         "OneToOneChat" => "[1:1]",
         "GroupChat" => "[group]",
         "TeamsStandardChannel" | "TeamsPrivateChannel" | "TeamsSharedChannel" => "[channel]",
         "MeetingChat" => "[meeting]",
+        _ if product_type.is_empty() => infer_chat_type_from_id(conv_id),
         _ => "[chat]",
+    }
+}
+
+/// Infer conversation type from the conversation ID format when `product_type`
+/// is missing from the API response.
+fn infer_chat_type_from_id(conv_id: &str) -> &'static str {
+    if conv_id.contains("@unq.gbl.spaces") {
+        "[1:1]"
+    } else if conv_id.ends_with("@thread.tacv2") {
+        "[channel]"
+    } else if conv_id.ends_with("@thread.v2") {
+        "[group]"
+    } else {
+        "[chat]"
     }
 }
 
