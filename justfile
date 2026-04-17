@@ -16,13 +16,13 @@ install: install-all
 install-all:
     @for crate in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.targets[] | .kind[] == "bin") | .manifest_path | split("/") | .[-2]'); do \
         echo "Installing $crate..."; \
-        cargo install --path crates/$crate; \
+        cargo install --path crates/$crate --force; \
     done
     @just install-scripts
 
 # Install a specific crate
 install-crate CRATE:
-    cargo install --path crates/{{CRATE}}
+    cargo install --path crates/{{CRATE}} --force
 
 # Install auth script and Node dependencies to data dir
 install-scripts:

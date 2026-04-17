@@ -26,6 +26,15 @@ const REQUIRED_RESOURCES = [
   "presence.teams.microsoft.com",
 ];
 
+const REQUIRED_CAPTURED_FIELDS = [
+  "skype_token",
+  "chat_token",
+  "graph_token",
+  "presence_token",
+];
+
+const MIN_CAPTURED_FIELDS = ["skype_token"];
+
 function parseArgs() {
   const args = process.argv.slice(2);
   let timeout = DEFAULT_TIMEOUT_SECS;
@@ -97,6 +106,36 @@ async function clearAuthCaches(page) {
   });
 }
 
+function normalizeBearerToken(headerValue) {
+  if (!headerValue || typeof headerValue !== "string") return null;
+  const trimmed = headerValue.trim();
+  if (!trimmed) return null;
+  return trimmed.replace(/^bearer\s+/i, "").trim() || null;
+}
+
+function hasAllCapturedTokens(tokens) {
+  return REQUIRED_CAPTURED_FIELDS.every((field) => {
+    const val = tokens[field];
+    return typeof val === "string" && val.length > 16;
+  });
+}
+
+function hasMinimumCapturedTokens(tokens) {
+  return MIN_CAPTURED_FIELDS.every((field) => {
+    const val = tokens[field];
+    return typeof val === "string" && val.length > 16;
+  });
+}
+
+function buildScriptTokenOutput(tokens) {
+  return {
+    skype_token: tokens.skype_token || "",
+    chat_token: tokens.chat_token || "",
+    graph_token: tokens.graph_token || "",
+    presence_token: tokens.presence_token || "",
+  };
+}
+
 async function main() {
   const { timeout, headless, fresh } = parseArgs();
   const deadlineMs = Date.now() + timeout * 1000;
@@ -129,6 +168,45 @@ async function main() {
 
   const page = context.pages()[0] || (await context.newPage());
 
+  const capturedTokens = {
+    skype_token: null,
+    chat_token: null,
+    graph_token: null,
+    presence_token: null,
+  };
+
+  context.on("request", (request) => {
+    try {
+      const authHeader = request.headers()["authorization"];
+      const token = normalizeBearerToken(authHeader);
+      if (!token) return;
+
+      const url = request.url().toLowerCase();
+
+      // Teams authz exchange uses the Skype access token as bearer.
+      if (url.includes("teams.microsoft.com/api/authsvc/v1.0/authz") && !capturedTokens.skype_token) {
+        capturedTokens.skype_token = token;
+        return;
+      }
+
+      if (url.includes("chatsvcagg.teams.microsoft.com") && !capturedTokens.chat_token) {
+        capturedTokens.chat_token = token;
+        return;
+      }
+
+      if (url.includes("graph.microsoft.com") && !capturedTokens.graph_token) {
+        capturedTokens.graph_token = token;
+        return;
+      }
+
+      if (url.includes("presence.teams.microsoft.com") && !capturedTokens.presence_token) {
+        capturedTokens.presence_token = token;
+      }
+    } catch {
+      // ignore request inspection errors
+    }
+  });
+
   try {
     await page.goto(TEAMS_URL, { waitUntil: "domcontentloaded" });
     log("Waiting for authentication...");
@@ -137,6 +215,7 @@ async function main() {
     // On Teams but no tokens after this many polls -> clear cache
     let onTeamsPolls = 0;
     const STALE_THRESHOLD = 5; // 10 seconds
+    let localStorageReadySince = null;
 
     while (Date.now() < deadlineMs) {
       await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
@@ -172,11 +251,29 @@ async function main() {
         continue; // context destroyed during navigation
       }
 
-      if (hasAllRequiredTokens(tokens)) {
-        log("All tokens extracted.");
-        process.stdout.write(JSON.stringify(tokens));
+      if (hasAllCapturedTokens(capturedTokens)) {
+        log("All tokens extracted (network capture).");
+        process.stdout.write(JSON.stringify(buildScriptTokenOutput(capturedTokens)));
         await context.close();
         process.exit(0);
+      }
+
+      if (hasAllRequiredTokens(tokens)) {
+        if (!localStorageReadySince) {
+          localStorageReadySince = Date.now();
+        }
+
+        // Give request-capture path a short grace period before minimal-output fallback.
+        if (Date.now() - localStorageReadySince >= 6000 && hasMinimumCapturedTokens(capturedTokens)) {
+          log("Using minimum captured tokens (skype_token) with optional token gaps.");
+          process.stdout.write(JSON.stringify(buildScriptTokenOutput(capturedTokens)));
+          await context.close();
+          process.exit(0);
+        }
+
+        log("Required localStorage entries found, waiting for network token capture...");
+      } else {
+        localStorageReadySince = null;
       }
 
       onTeamsPolls++;
@@ -201,6 +298,13 @@ async function main() {
       if (count > 0) {
         log(`${count} tokens found, waiting for all ${REQUIRED_RESOURCES.length}...`);
       }
+    }
+
+    if (hasMinimumCapturedTokens(capturedTokens)) {
+      log("Timed out before full token set; using captured minimum token set.");
+      process.stdout.write(JSON.stringify(buildScriptTokenOutput(capturedTokens)));
+      await context.close();
+      process.exit(0);
     }
 
     log("ERROR: Timed out waiting for authentication.");

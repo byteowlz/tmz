@@ -12,7 +12,7 @@
 use crate::CoreError;
 use crate::teams::models::TeamsTokens;
 use crate::teams::storage::TokenStorage;
-use serde::Deserialize;
+use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -30,12 +30,6 @@ pub enum AuthenticationError {
     /// JWT parsing error.
     #[error("JWT parsing error: {0}")]
     JwtError(String),
-}
-
-/// Token data structure from MSAL localStorage.
-#[derive(Debug, Clone, Deserialize)]
-struct MsalToken {
-    secret: String,
 }
 
 /// Handles Teams authentication and token management.
@@ -286,18 +280,26 @@ impl AuthManager {
         &self,
         output: &serde_json::Value,
     ) -> Result<TeamsTokens, AuthenticationError> {
-        let get = |field: &str| -> Result<String, AuthenticationError> {
+        let get_required = |field: &str| -> Result<String, AuthenticationError> {
             output[field].as_str().map(String::from).ok_or_else(|| {
                 AuthenticationError::TokenExtractionError(format!("missing {field} in output"))
             })
         };
+        let get_optional = |field: &str| -> String {
+            output[field].as_str().map(String::from).unwrap_or_default()
+        };
 
-        let skype_token = get("skype_token")?;
-        let chat_token = get("chat_token")?;
-        let graph_token = get("graph_token")?;
-        let presence_token = get("presence_token")?;
+        let skype_token = get_required("skype_token")?;
+        let chat_token = get_optional("chat_token");
+        let graph_token = get_optional("graph_token");
+        let presence_token = get_optional("presence_token");
 
-        let (tenant_id, user_id, upn, expires_at) = parse_token_claims(&skype_token)?;
+        let (tenant_id, user_id, upn, expires_at) = derive_identity_from_tokens([
+            skype_token.as_str(),
+            chat_token.as_str(),
+            graph_token.as_str(),
+            presence_token.as_str(),
+        ]);
 
         let tokens = TeamsTokens {
             skype_token,
@@ -323,32 +325,25 @@ impl AuthManager {
         &self,
         local_storage: &std::collections::HashMap<String, String>,
     ) -> Result<TeamsTokens, AuthenticationError> {
-        let skype_token_json = Self::find_token(local_storage, "api.spaces.skype.com")?;
-        let chat_token_json = Self::find_token(local_storage, "chatsvcagg.teams.microsoft.com")?;
-        let graph_token_json = Self::find_token(local_storage, "graph.microsoft.com")?;
-        let presence_token_json = Self::find_token(local_storage, "presence.teams.microsoft.com")?;
+        let skype_token = Self::extract_resource_token(local_storage, "api.spaces.skype.com")?;
+        let chat_token =
+            Self::extract_resource_token(local_storage, "chatsvcagg.teams.microsoft.com")?;
+        let graph_token = Self::extract_resource_token(local_storage, "graph.microsoft.com")?;
+        let presence_token =
+            Self::extract_resource_token(local_storage, "presence.teams.microsoft.com")?;
 
-        let skype_token: MsalToken = serde_json::from_str(&skype_token_json).map_err(|e| {
-            AuthenticationError::TokenExtractionError(format!("parsing skype token: {e}"))
-        })?;
-        let chat_token: MsalToken = serde_json::from_str(&chat_token_json).map_err(|e| {
-            AuthenticationError::TokenExtractionError(format!("parsing chat token: {e}"))
-        })?;
-        let graph_token: MsalToken = serde_json::from_str(&graph_token_json).map_err(|e| {
-            AuthenticationError::TokenExtractionError(format!("parsing graph token: {e}"))
-        })?;
-        let presence_token: MsalToken =
-            serde_json::from_str(&presence_token_json).map_err(|e| {
-                AuthenticationError::TokenExtractionError(format!("parsing presence token: {e}"))
-            })?;
-
-        let (tenant_id, user_id, upn, expires_at) = parse_token_claims(&skype_token.secret)?;
+        let (tenant_id, user_id, upn, expires_at) = derive_identity_from_tokens([
+            skype_token.as_str(),
+            chat_token.as_str(),
+            graph_token.as_str(),
+            presence_token.as_str(),
+        ]);
 
         let tokens = TeamsTokens {
-            skype_token: skype_token.secret,
-            chat_token: chat_token.secret,
-            graph_token: graph_token.secret,
-            presence_token: presence_token.secret,
+            skype_token,
+            chat_token,
+            graph_token,
+            presence_token,
             tenant_id,
             user_id,
             user_principal_name: upn,
@@ -371,7 +366,8 @@ impl AuthManager {
         graph_token: &str,
         presence_token: &str,
     ) -> Result<TeamsTokens, AuthenticationError> {
-        let (tenant_id, user_id, upn, expires_at) = parse_token_claims(skype_token)?;
+        let (tenant_id, user_id, upn, expires_at) =
+            derive_identity_from_tokens([skype_token, chat_token, graph_token, presence_token]);
 
         let tokens = TeamsTokens {
             skype_token: skype_token.to_string(),
@@ -398,24 +394,207 @@ impl AuthManager {
         Ok(())
     }
 
-    fn find_token(
+    fn extract_resource_token(
         local_storage: &std::collections::HashMap<String, String>,
         resource: &str,
     ) -> Result<String, AuthenticationError> {
-        local_storage
+        let resource_lower = resource.to_lowercase();
+
+        let mut candidates: Vec<(&str, &str)> = local_storage
             .iter()
-            .find(|(k, _)| {
-                k.contains("accesstoken")
-                    && k.contains("login.windows.net")
-                    && k.to_lowercase().contains(&resource.to_lowercase())
+            .filter_map(|(key, value)| {
+                let key_lower = key.to_lowercase();
+                (key_lower.contains("accesstoken")
+                    && key_lower.contains("login.windows.net")
+                    && key_lower.contains(&resource_lower))
+                .then_some((key.as_str(), value.as_str()))
             })
-            .map(|(_, v)| v.clone())
-            .ok_or_else(|| {
-                AuthenticationError::TokenExtractionError(format!(
-                    "no token found for resource: {resource}"
-                ))
-            })
+            .collect();
+
+        if candidates.is_empty() {
+            return Err(AuthenticationError::TokenExtractionError(format!(
+                "no token found for resource: {resource}"
+            )));
+        }
+
+        // Prefer Teams client-id scoped entries first. There can be many stale
+        // access-token entries in localStorage and iteration order is undefined.
+        candidates.sort_by_key(|(key, _)| {
+            let key_lower = key.to_lowercase();
+            let client_rank = if key_lower.contains(Self::TEAMS_CLIENT_ID) {
+                0usize
+            } else {
+                1usize
+            };
+            (client_rank, key.len())
+        });
+
+        let mut first_parseable: Option<String> = None;
+        let mut parse_errors = Vec::new();
+
+        for (key, value) in candidates {
+            match Self::extract_access_token(value) {
+                Ok(token) => {
+                    // Keep first parseable token as fallback. For JWT-like tokens,
+                    // prefer one with decodable claims.
+                    if parse_token_claims(&token).is_ok() {
+                        return Ok(token);
+                    }
+                    if first_parseable.is_none() {
+                        first_parseable = Some(token);
+                    }
+                }
+                Err(e) => parse_errors.push(format!("{key}: {e}")),
+            }
+        }
+
+        if let Some(token) = first_parseable {
+            return Ok(token);
+        }
+
+        Err(AuthenticationError::TokenExtractionError(format!(
+            "unable to parse token for resource {resource}. {} candidate(s) found. {}",
+            parse_errors.len(),
+            if parse_errors.is_empty() {
+                "No parse details available.".to_string()
+            } else {
+                parse_errors.join(" | ")
+            }
+        )))
     }
+
+    fn extract_access_token(raw_value: &str) -> Result<String, AuthenticationError> {
+        extract_jwt_from_str(raw_value, 5).ok_or_else(|| {
+            AuthenticationError::TokenExtractionError(
+                "missing access token field in token payload".to_string(),
+            )
+        })
+    }
+}
+
+fn looks_like_jwt(value: &str) -> bool {
+    let value = normalize_token_candidate(value);
+    if value.contains(' ') {
+        return false;
+    }
+
+    let segments: Vec<&str> = value.split('.').collect();
+    if !(segments.len() == 3 || segments.len() == 5) {
+        return false;
+    }
+
+    segments
+        .iter()
+        .all(|segment| !segment.is_empty() && segment.chars().all(is_token_char))
+}
+
+fn normalize_token_candidate(input: &str) -> String {
+    let mut s = input
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_string();
+
+    // Common wrapper from auth headers.
+    if s.to_ascii_lowercase().starts_with("bearer ") {
+        s = s[7..].trim().to_string();
+    }
+
+    s
+}
+
+fn extract_jwt_from_str(input: &str, depth: usize) -> Option<String> {
+    let normalized = normalize_token_candidate(input);
+    if looks_like_jwt(&normalized) {
+        return Some(normalized);
+    }
+
+    if let Ok(decoded) = urlencoding::decode(&normalized) {
+        let decoded = normalize_token_candidate(decoded.as_ref());
+        if looks_like_jwt(&decoded) {
+            return Some(decoded);
+        }
+    }
+
+    if depth == 0 {
+        return None;
+    }
+
+    let parsed: Value = serde_json::from_str(&normalized).ok()?;
+    extract_jwt_from_value(&parsed, depth - 1)
+}
+
+fn extract_jwt_from_value(value: &Value, depth: usize) -> Option<String> {
+    if depth == 0 {
+        return None;
+    }
+
+    match value {
+        Value::String(s) => extract_jwt_from_str(s, depth - 1),
+        Value::Array(items) => items
+            .iter()
+            .find_map(|item| extract_jwt_from_value(item, depth - 1)),
+        Value::Object(map) => {
+            for key in preferred_token_fields() {
+                if let Some(value) = map.get(*key)
+                    && let Some(token) = extract_jwt_from_value(value, depth - 1)
+                {
+                    return Some(token);
+                }
+            }
+
+            // Then scan fields that look token-ish.
+            for (key, value) in map {
+                let key_lower = key.to_lowercase();
+                if (key_lower.contains("token")
+                    || key_lower.contains("secret")
+                    || key_lower.contains("credential"))
+                    && let Some(token) = extract_jwt_from_value(value, depth - 1)
+                {
+                    return Some(token);
+                }
+            }
+
+            // Last resort: deep scan every value.
+            map.values()
+                .find_map(|child| extract_jwt_from_value(child, depth - 1))
+        }
+        _ => None,
+    }
+}
+
+fn preferred_token_fields() -> &'static [&'static str] {
+    &[
+        "secret",
+        "accesstoken",
+        "access_token",
+        "token",
+        "credential",
+        "value",
+        "assertion",
+    ]
+}
+
+fn is_token_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '~'
+}
+
+fn derive_identity_from_tokens<'a>(
+    tokens: impl IntoIterator<Item = &'a str>,
+) -> (String, String, String, i64) {
+    for token in tokens {
+        if let Ok(parsed) = parse_token_claims(token) {
+            return parsed;
+        }
+    }
+
+    // Fallback for non-JWT/opaque access tokens.
+    (
+        "unknown".to_string(),
+        "unknown".to_string(),
+        "unknown".to_string(),
+        now_epoch() + 3600,
+    )
 }
 
 fn now_epoch() -> i64 {
@@ -425,6 +604,7 @@ fn now_epoch() -> i64 {
 }
 
 fn parse_token_claims(token: &str) -> Result<(String, String, String, i64), AuthenticationError> {
+    let token = normalize_token_candidate(token);
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
         return Err(AuthenticationError::JwtError(

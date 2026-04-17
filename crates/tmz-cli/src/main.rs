@@ -597,7 +597,17 @@ async fn handle_auth(_ctx: &RuntimeContext, cmd: AuthSubcommand) -> Result<()> {
                 return Ok(());
             }
 
-            let tokens = auth.browser_login(Some(timeout), false, fresh).await?;
+            let tokens = match auth.browser_login(Some(timeout), false, fresh).await {
+                Ok(tokens) => tokens,
+                Err(err) if !fresh => {
+                    eprintln!(
+                        "Normal login failed ({err}). Retrying with a fresh browser profile..."
+                    );
+                    auth.browser_login(Some(timeout), false, true).await?
+                }
+                Err(err) => return Err(err.into()),
+            };
+
             // Clear any reauth notice from the daemon
             let _ = tmz_core::daemon::clear_reauth_needed();
             println!("Authenticated as: {}", tokens.user_principal_name);
