@@ -421,11 +421,7 @@ impl AuthManager {
         // access-token entries in localStorage and iteration order is undefined.
         candidates.sort_by_key(|(key, _)| {
             let key_lower = key.to_lowercase();
-            let client_rank = if key_lower.contains(Self::TEAMS_CLIENT_ID) {
-                0usize
-            } else {
-                1usize
-            };
+            let client_rank = usize::from(!key_lower.contains(Self::TEAMS_CLIENT_ID));
             (client_rank, key.len())
         });
 
@@ -563,7 +559,7 @@ fn extract_jwt_from_value(value: &Value, depth: usize) -> Option<String> {
     }
 }
 
-fn preferred_token_fields() -> &'static [&'static str] {
+const fn preferred_token_fields() -> &'static [&'static str] {
     &[
         "secret",
         "accesstoken",
@@ -575,7 +571,7 @@ fn preferred_token_fields() -> &'static [&'static str] {
     ]
 }
 
-fn is_token_char(c: char) -> bool {
+const fn is_token_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '~'
 }
 

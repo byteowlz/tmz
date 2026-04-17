@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+### Changed
+- Added ast-grep Rust AI guardrails (`.ast-grep/` rules + `scripts/lint/rust-ai-guardrails.sh`) aligned with the hstry linting setup.
+- Updated `just lint` and `just check-all` to include ast-grep guardrail scanning alongside Clippy.
+- Added `just install-ast-grep` for one-command ast-grep installation.
+
 ### Fixed
 - Made Teams auth token extraction resilient to updated MSAL localStorage payload formats (not only `secret`).
 - Fixed unstable token selection when multiple access-token entries exist by preferring Teams client-id scoped entries.
