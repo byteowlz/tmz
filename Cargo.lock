@@ -3357,7 +3357,6 @@ dependencies = [
  "base64",
  "chrono",
  "config",
- "dirs",
  "log",
  "reqwest",
  "schemars",
