@@ -180,7 +180,7 @@ tmz completions <shell>      # Generate shell completions (bash, zsh, fish)
 Config at `$XDG_CONFIG_HOME/tmz/config.toml` (default: `~/.config/tmz/config.toml`).
 
 ```toml
-"$schema" = "https://raw.githubusercontent.com/byteowlz/schemas/refs/heads/main/tmz/tmz.config.schema.json"
+#:schema https://raw.githubusercontent.com/byteowlz/schemas/refs/heads/main/tmz/tmz.config.schema.json
 
 profile = "default"
 

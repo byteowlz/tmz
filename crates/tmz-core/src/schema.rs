@@ -81,7 +81,7 @@ pub fn generate_example_config(project_name: &str) -> Result<String> {
     let mut output = String::new();
     let _ = write!(
         output,
-        r#""$schema" = "{schema_url}"
+        r#"#:schema {schema_url}
 
 # Configuration for {project_name}.
 # Copy this file to $XDG_CONFIG_HOME/{project_name}/config.toml and adjust as needed.
@@ -190,7 +190,7 @@ mod tests {
         let schema = generate_schema(APP_NAME, REPO_URL).expect("schema generation failed");
         assert!(schema.contains("\"title\""));
         assert!(schema.contains("tmz configuration"));
-        assert!(schema.contains("\"$schema\""));
+        assert!(schema.contains("#:schema"));
         assert!(schema.contains("LogLevel"));
     }
 
